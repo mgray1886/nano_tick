@@ -1,0 +1,2 @@
+# Everything in this repo deploys to Linux (Pi) — keep LF in repo and working copy.
+* text=auto eol=lf

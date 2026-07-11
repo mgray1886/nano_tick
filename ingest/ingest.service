@@ -1,0 +1,30 @@
+[Unit]
+Description=Nano Tick ingest service
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+# User/group/paths below are filled in by setup.sh at install time.
+User=__USER__
+Group=__GROUP__
+WorkingDirectory=__APP_DIR__
+EnvironmentFile=__APP_DIR__/.env
+ExecStart=__APP_DIR__/venv/bin/python __APP_DIR__/main.py
+Restart=always
+RestartSec=5
+# Guard-rails on a 512MB box: normal footprint is ~35M (worst case ~100M with
+# a full sink buffer). MemoryHigh throttles a runaway process, MemoryMax kills
+# it and Restart=always brings it back — far better than the kernel OOM killer
+# picking a random victim like sshd.
+MemoryHigh=192M
+MemoryMax=256M
+RestartPreventExitStatus=0
+TimeoutStopSec=20
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
