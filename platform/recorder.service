@@ -1,0 +1,27 @@
+[Unit]
+Description=Nano Tick recorder service
+After=network-online.target mosquitto.service
+Wants=network-online.target mosquitto.service
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+# User/group/paths below are filled in by setup.sh at install time.
+User=__USER__
+Group=__GROUP__
+WorkingDirectory=__APP_DIR__
+EnvironmentFile=-__APP_DIR__/.env
+ExecStart=__APP_DIR__/venv/bin/python __APP_DIR__/recorder.py
+Restart=always
+RestartSec=5
+# The 4B has more RAM than the 3A+, but a runaway recorder should still be
+# restarted by systemd rather than left to the kernel OOM killer.
+MemoryHigh=256M
+MemoryMax=384M
+TimeoutStopSec=20
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
