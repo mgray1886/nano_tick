@@ -1,0 +1,43 @@
+# Local end-to-end test stack mirroring the two-Pi topology:
+#   ingest (= Pi 3A+) --> broker (= mosquitto on Pi 4B) --> receiver (= 4B consumer)
+# Usage: docker compose up --build   (ingest pulls real Binance data)
+services:
+  broker:
+    image: eclipse-mosquitto:2
+    volumes:
+      - ./docker/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto-data:/mosquitto/data
+    ports:
+      - "1883:1883" # lets host-side tools (e.g. mosquitto_sub, MQTT Explorer) peek at the feed
+
+  ingest:
+    build: .
+    command: python ingest/main.py
+    environment:
+      SINK_TYPE: mqtt
+      MQTT_HOST: broker
+      SYMBOL: btcusdt
+      LOG_LEVEL: INFO
+    depends_on:
+      - broker
+    restart: unless-stopped
+
+  receiver:
+    build: .
+    command: python tools/receiver.py --host broker
+    depends_on:
+      - broker
+
+  recorder:
+    build: .
+    command: python platform/recorder.py
+    environment:
+      MQTT_HOST: broker
+      DATA_DIR: /data
+    volumes:
+      - ./tmp/recorder:/data # gitignored; inspect recorded NDJSON here
+    depends_on:
+      - broker
+
+volumes:
+  mosquitto-data:
