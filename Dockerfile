@@ -1,5 +1,5 @@
 # Local test image only - the Pi runs bare-metal via setup.sh/systemd.
-FROM python:3.12-slim
+FROM python:3.13-slim
 
 WORKDIR /app
 
