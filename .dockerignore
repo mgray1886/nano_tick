@@ -8,3 +8,4 @@ logs/
 .setup_complete
 .git/
 .pytest_cache/
+*.lic
