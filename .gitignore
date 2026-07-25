@@ -5,6 +5,8 @@
 *.pem
 *.key
 *.crt
+# kdb licences (kc.lic community / k4.lic commercial)
+*.lic
 secrets/
 config.local.*
 *.secret
