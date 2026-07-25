@@ -16,6 +16,8 @@ def test_defaults(monkeypatch):
     assert config.mqtt_host == "192.168.100.2"
     assert config.mqtt_port == 1883
     assert config.mqtt_max_queued == 50000
+    assert config.sink_host == "192.168.100.2"
+    assert config.sink_port == 9000
     assert config.sink_buffer_mb == 64
 
 

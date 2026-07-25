@@ -41,8 +41,25 @@ class FakeStream(base.WebsocketStream):
 
 
 def install_connections(monkeypatch, connections):
+    # An Exception in the sequence is raised at connect time (before __aenter__),
+    # i.e. a failed dial rather than a mid-stream drop.
     iterator = iter(connections)
-    monkeypatch.setattr(base.websockets, "connect", lambda url: next(iterator))
+
+    def connect(url):
+        item = next(iterator)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    monkeypatch.setattr(base.websockets, "connect", connect)
+
+
+def record_sleeps(monkeypatch):
+    """Capture backoff sleeps and return the list, without actually waiting."""
+    sleeps = []
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(base.asyncio, "sleep", lambda s: sleeps.append(s) or real_sleep(0))
+    return sleeps
 
 
 async def take(stream, n):
@@ -87,6 +104,29 @@ def test_reconnects_with_backoff_after_drop(monkeypatch):
 
     assert asyncio.run(take(FakeStream(), 2)) == [{"n": 1}, {"n": 2}]
     assert sleeps == [FakeStream.initial_backoff]
+
+
+def test_backoff_doubles_and_caps_on_repeated_connect_failures(monkeypatch):
+    # Connect-time failures never reach the reset, so backoff grows then caps.
+    install_connections(monkeypatch, [
+        OSError("dial failed"), OSError("dial failed"), OSError("dial failed"),
+        FakeConnection([json.dumps({"n": 1})]),
+    ])
+    sleeps = record_sleeps(monkeypatch)
+    assert asyncio.run(take(FakeStream(), 1)) == [{"n": 1}]
+    assert sleeps == [0.001, 0.002, 0.002]  # initial, doubled, capped at max_backoff
+
+
+def test_backoff_resets_after_successful_connection(monkeypatch):
+    # A good connection resets backoff, so a later drop starts at initial again.
+    install_connections(monkeypatch, [
+        OSError("dial failed"),                                       # sleep initial
+        FakeConnection([json.dumps({"n": 1})], exc=OSError("drop")),  # connects, resets, drops
+        FakeConnection([json.dumps({"n": 2})]),
+    ])
+    sleeps = record_sleeps(monkeypatch)
+    assert asyncio.run(take(FakeStream(), 2)) == [{"n": 1}, {"n": 2}]
+    assert sleeps == [0.001, 0.001]  # not [.., 0.002] — the good connection cleared the growth
 
 
 def test_subscribe_hook_runs_once_per_connection(monkeypatch):
