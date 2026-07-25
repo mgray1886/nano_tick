@@ -78,3 +78,13 @@ def test_send_counts_drops_when_queue_full(monkeypatch):
         sink.send({**TICK, "trade_id": i})  # must not raise
     assert len(sink._client.published) == 5
     assert sink._dropped == 15
+
+
+def test_connection_callbacks_track_connected_state(monkeypatch):
+    # The stats loop reports on this flag, so the callbacks must keep it honest.
+    sink = make_sink(monkeypatch)
+    assert sink._connected is False
+    sink._on_connect(None, None, None, "ok", None)
+    assert sink._connected is True
+    sink._on_disconnect(None, None, None, "closed", None)
+    assert sink._connected is False

@@ -140,6 +140,27 @@ def test_unacked_messages_resend_on_reconnect(monkeypatch):
     assert writer1.closed
 
 
+def test_partial_ack_evicts_only_up_to_that_seq(monkeypatch):
+    async def scenario():
+        reader, writer = FakeReader(), FakeWriter()
+        install_connections(monkeypatch, [(reader, writer)])
+
+        sink = TcpSink("h", 1, reconnect_delay=0.001)
+        sink.start()
+        for i in range(5):
+            sink.send({"trade_id": i})
+        await wait_for(lambda: len(writer.lines) == 5)
+
+        reader.feed_ack(3)  # cumulative ack up to seq 3 only
+        await wait_for(lambda: len(sink._unacked) == 2)
+        remaining = [seq for seq, _ in sink._unacked]
+
+        await sink.stop()
+        return remaining
+
+    assert asyncio.run(scenario()) == [4, 5]  # seqs 1-3 evicted, 4-5 still pending
+
+
 def test_malformed_ack_is_ignored(monkeypatch):
     async def scenario():
         reader, writer = FakeReader(), FakeWriter()
