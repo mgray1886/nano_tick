@@ -17,8 +17,11 @@ without reworking this code.
 Run on the 4B (needs a licensed q via pykx):  python platform/app.py
 """
 import logging
+import sys
+from pathlib import Path
 
-import backfill
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo root for resources/
+from resources import backfill  # noqa: E402
 
 logging.basicConfig(level="INFO", format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("app")

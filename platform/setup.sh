@@ -5,6 +5,7 @@
 set -e
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(dirname "$APP_DIR")"    # recorder.py now lives in ../resources
 SERVICE_NAME="recorder.service"
 
 # Service identity: whoever runs this script (survives sudo invocation).
@@ -39,6 +40,7 @@ python -m pip install -r "$APP_DIR"/requirements.txt
 sed -e "s|__USER__|$RUN_USER|g" \
     -e "s|__GROUP__|$RUN_GROUP|g" \
     -e "s|__APP_DIR__|$APP_DIR|g" \
+    -e "s|__REPO_DIR__|$REPO_DIR|g" \
     "$APP_DIR/$SERVICE_NAME" | sudo tee /etc/systemd/system/$SERVICE_NAME > /dev/null
 sudo systemctl daemon-reload
 sudo systemctl enable $SERVICE_NAME

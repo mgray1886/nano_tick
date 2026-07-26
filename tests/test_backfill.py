@@ -5,22 +5,28 @@ from datetime import date
 
 import pytest
 
-import backfill
-
-HEADER = "id,price,qty,quoteQty,time,isBuyerMaker,isBestMatch"
+from resources import backfill
 
 
 def csv_row(tid, price, qty, t, maker):
     return f"{tid},{price},{qty},{price * qty},{t},{str(maker).lower()},true"
 
 
-def make_zip(csv_text, name="BTCUSDT-trades-2026-07-15.csv", extra=None):
+def make_zip(csv_text, name="BTCUSDT-trades-2026-07-15.csv"):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(name, csv_text)
-        if extra:
-            zf.writestr(extra, csv_text)
     return buf.getvalue()
+
+
+def _cfg(hdb, days=30):
+    return backfill.BackfillConfig(symbol="BTCUSDT", venue="binance", days=days,
+                                   chunk_size=10, hdb_path=hdb,
+                                   schema_q=hdb / "schema.q")
+
+
+def _mkpart(hdb, name):
+    (hdb / name / "trade").mkdir(parents=True)
 
 
 # --- date planning ---------------------------------------------------------
@@ -33,121 +39,10 @@ def test_plan_dates_is_n_complete_days_ending_yesterday():
     assert dates == sorted(dates)
 
 
-# --- URLs ------------------------------------------------------------------
-
-def test_urls():
-    d = date(2026, 7, 15)
-    assert backfill.archive_url("BTCUSDT", d) == (
-        "https://data.binance.vision/data/spot/daily/trades/"
-        "BTCUSDT/BTCUSDT-trades-2026-07-15.zip"
-    )
-    assert backfill.checksum_url("BTCUSDT", d).endswith("2026-07-15.zip.CHECKSUM")
-
-
-# --- checksum --------------------------------------------------------------
-
-def test_verify_checksum_match_and_mismatch():
-    blob = b"some-zip-bytes"
-    digest = hashlib.sha256(blob).hexdigest()
-    assert backfill.verify_checksum(blob, f"{digest}  BTCUSDT-trades-2026-07-15.zip")
-    assert not backfill.verify_checksum(blob, "deadbeef  BTCUSDT-trades-2026-07-15.zip")
-
-
-# --- http ------------------------------------------------------------------
-
-class FakeResp:
-    """Context-manager stand-in for urlopen()'s response."""
-
-    def __init__(self, body):
-        self._body = body
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        return False
-
-    def read(self):
-        return self._body
-
-
-def test_http_get_returns_body(monkeypatch):
-    monkeypatch.setattr(backfill.urllib.request, "urlopen",
-                        lambda url, timeout: FakeResp(b"payload"))
-    assert backfill.http_get("http://x") == b"payload"
-
-
-def test_http_get_404_returns_none(monkeypatch):
-    def not_found(url, timeout):
-        raise backfill.urllib.error.HTTPError(url, 404, "Not Found", {}, None)
-    monkeypatch.setattr(backfill.urllib.request, "urlopen", not_found)
-    assert backfill.http_get("http://x") is None
-
-
-def test_http_get_retries_then_raises(monkeypatch):
-    attempts = []
-
-    def flaky(url, timeout):
-        attempts.append(url)
-        raise backfill.urllib.error.URLError("temporary")
-
-    monkeypatch.setattr(backfill.urllib.request, "urlopen", flaky)
-    with pytest.raises(RuntimeError):
-        backfill.http_get("http://x", retries=3)
-    assert len(attempts) == 3  # exhausted all retries before giving up
-
-
-# --- parsing ---------------------------------------------------------------
-
-def test_iter_trade_chunks_maps_columns_with_header():
-    csv_text = "\n".join([
-        HEADER,
-        csv_row(100, 42000.5, 0.01, 1700000000000, True),
-        csv_row(101, 42001.0, 0.02, 1700000000100, False),
-    ])
-    chunks = list(backfill.iter_trade_chunks(make_zip(csv_text), "BTCUSDT", "binance"))
-    assert len(chunks) == 1
-    cols = chunks[0]
-    assert cols["tradeID"] == [100, 101]
-    assert cols["price"] == [42000.5, 42001.0]
-    assert cols["qty"] == [0.01, 0.02]
-    assert cols["time"] == [1700000000000, 1700000000100]
-    assert cols["eventTime"] == cols["time"]  # archive has no emit time
-    assert cols["sym"] == ["BTCUSDT", "BTCUSDT"]
-    assert cols["venue"] == ["binance", "binance"]
-    assert cols["buyerMaker"] == [True, False]
-
-
-def test_iter_trade_chunks_without_header():
-    csv_text = csv_row(100, 1.0, 2.0, 1700000000000, True)
-    chunks = list(backfill.iter_trade_chunks(make_zip(csv_text), "BTCUSDT", "binance"))
-    assert chunks[0]["tradeID"] == [100]
-
-
-def test_iter_trade_chunks_respects_chunk_size():
-    rows = [csv_row(i, 1.0, 1.0, 1700000000000 + i, True) for i in range(5)]
-    chunks = list(backfill.iter_trade_chunks(
-        make_zip("\n".join(rows)), "BTCUSDT", "binance", chunk_size=2))
-    assert [len(c["tradeID"]) for c in chunks] == [2, 2, 1]
-    assert [tid for c in chunks for tid in c["tradeID"]] == [0, 1, 2, 3, 4]
-
-
-def test_iter_trade_chunks_skips_blank_lines():
-    csv_text = csv_row(1, 1.0, 1.0, 1700000000000, True) + "\n\n"
-    chunks = list(backfill.iter_trade_chunks(make_zip(csv_text), "BTCUSDT", "binance"))
-    assert chunks[0]["tradeID"] == [1]
-
-
-def test_iter_trade_chunks_rejects_ambiguous_archive():
-    zip_bytes = make_zip("x", extra="BTCUSDT-trades-2026-07-15-extra.csv")
-    with pytest.raises(ValueError):
-        list(backfill.iter_trade_chunks(zip_bytes, "BTCUSDT", "binance"))
-
-
-# --- idempotency -----------------------------------------------------------
+# --- HDB inspection --------------------------------------------------------
 
 def test_existing_partition_dates(tmp_path):
-    (tmp_path / "2026.07.15" / "trade").mkdir(parents=True)
+    _mkpart(tmp_path, "2026.07.15")
     (tmp_path / "2026.07.14").mkdir()          # no trade dir -> not counted
     (tmp_path / "sym").write_text("")          # enum file -> ignored
     (tmp_path / "notadate" / "trade").mkdir(parents=True)
@@ -158,58 +53,60 @@ def test_existing_partition_dates_missing_hdb(tmp_path):
     assert backfill.existing_partition_dates(tmp_path / "nope") == set()
 
 
-# --- real fetch composition (download + checksum + parse) ------------------
+def test_latest_partition_tradeid_path(tmp_path):
+    assert backfill.latest_partition_tradeid_path(tmp_path) is None
+    _mkpart(tmp_path, "2026.07.14")
+    _mkpart(tmp_path, "2026.07.16")
+    _mkpart(tmp_path, "2026.07.15")
+    assert backfill.latest_partition_tradeid_path(tmp_path) == (
+        tmp_path / "2026.07.16" / "trade" / "tradeID")
+
+
+# --- fetch composition (client download + data parse) ----------------------
 
 def test_make_fetch_day_downloads_verifies_and_parses(monkeypatch):
-    csv_text = csv_row(1, 1.0, 1.0, 1700000000000, True)
-    zip_bytes = make_zip(csv_text)
+    zip_bytes = make_zip(csv_row(1, 1.0, 1.0, 1700000000000, True))
     checksum = f"{hashlib.sha256(zip_bytes).hexdigest()}  name.zip".encode()
-
-    monkeypatch.setattr(
-        backfill, "http_get",
-        lambda url, *a, **k: zip_bytes if url.endswith(".zip") else checksum)
-    fetch = backfill.make_fetch_day("BTCUSDT", "binance", 1000)
-    chunks = list(fetch(date(2026, 7, 15)))
+    monkeypatch.setattr(backfill.binance_client, "download_archive", lambda s, d: zip_bytes)
+    monkeypatch.setattr(backfill.binance_client, "download_checksum", lambda s, d: checksum)
+    chunks = list(backfill.make_fetch_day("BTCUSDT", "binance", 1000)(date(2026, 7, 15)))
     assert sum(len(c["tradeID"]) for c in chunks) == 1
 
 
 def test_make_fetch_day_raises_on_checksum_mismatch(monkeypatch):
     zip_bytes = make_zip(csv_row(1, 1.0, 1.0, 1700000000000, True))
-    monkeypatch.setattr(
-        backfill, "http_get",
-        lambda url, *a, **k: zip_bytes if url.endswith(".zip") else b"bad  name.zip")
-    fetch = backfill.make_fetch_day("BTCUSDT", "binance", 1000)
+    monkeypatch.setattr(backfill.binance_client, "download_archive", lambda s, d: zip_bytes)
+    monkeypatch.setattr(backfill.binance_client, "download_checksum", lambda s, d: b"bad  n.zip")
     with pytest.raises(ValueError):
-        list(fetch(date(2026, 7, 15)))
+        list(backfill.make_fetch_day("BTCUSDT", "binance", 1000)(date(2026, 7, 15)))
 
 
 def test_make_fetch_day_returns_none_when_not_published(monkeypatch):
-    monkeypatch.setattr(backfill, "http_get", lambda url, *a, **k: None)
-    fetch = backfill.make_fetch_day("BTCUSDT", "binance", 1000)
-    assert fetch(date(2026, 7, 15)) is None
+    monkeypatch.setattr(backfill.binance_client, "download_archive", lambda s, d: None)
+    assert backfill.make_fetch_day("BTCUSDT", "binance", 1000)(date(2026, 7, 15)) is None
 
 
-def test_make_fetch_day_parses_when_checksum_absent(monkeypatch):
-    # CHECKSUM 404s (None): verification is skipped, the zip still parses.
-    zip_bytes = make_zip(csv_row(1, 1.0, 1.0, 1700000000000, True))
-    monkeypatch.setattr(
-        backfill, "http_get",
-        lambda url, *a, **k: zip_bytes if url.endswith(".zip") else None)
-    fetch = backfill.make_fetch_day("BTCUSDT", "binance", 1000)
-    chunks = list(fetch(date(2026, 7, 15)))
-    assert sum(len(c["tradeID"]) for c in chunks) == 1
-
-
-# --- orchestration ---------------------------------------------------------
+# --- archive orchestration -------------------------------------------------
 
 class FakeWriter:
-    def __init__(self):
+    """Records write_day/insert calls; stands in for HdbWriter (no pykx)."""
+
+    def __init__(self, floor=None):
         self.writes = []
+        self.inserted = []
+        self._floor = floor
 
     def write_day(self, day, chunks):
         n = sum(len(c["tradeID"]) for c in chunks)
         self.writes.append((day, n))
         return n
+
+    def insert(self, cols):
+        self.inserted.extend(cols["tradeID"])
+        return len(cols["tradeID"])
+
+    def max_stored_id(self):
+        return self._floor
 
 
 def test_run_backfill_skips_existing_writes_missing_and_records_failures():
@@ -228,10 +125,10 @@ def test_run_backfill_skips_existing_writes_missing_and_records_failures():
     summary = backfill.run_backfill([d1, d2, d3, d4], {d1}, fetch_day, writer)
 
     assert summary == {"written": 1, "rows": 3, "skipped": 1, "missing": 1, "failed": 1}
-    assert writer.writes == [(d2, 3)]  # only the one available, non-existing day
+    assert writer.writes == [(d2, 3)]
 
 
-# --- config + app-facing run() resource ------------------------------------
+# --- config + run() resource -----------------------------------------------
 
 def test_config_from_env_defaults(monkeypatch):
     for v in ("SYMBOL", "VENUE", "BACKFILL_DAYS", "BACKFILL_CHUNK", "HDB_PATH"):
@@ -242,6 +139,7 @@ def test_config_from_env_defaults(monkeypatch):
     assert cfg.days == 30
     assert cfg.chunk_size == 500000
     assert cfg.schema_q.name == "schema.q"
+    assert cfg.api_key is None
 
 
 def test_config_from_env_overrides(monkeypatch):
@@ -253,31 +151,48 @@ def test_config_from_env_overrides(monkeypatch):
 
 
 def test_run_uses_injected_writer_without_touching_kdb(monkeypatch, tmp_path):
-    # Inject a fake writer + stub fetch/existing so no pykx or network is needed;
-    # proves run() reuses the passed writer rather than building an HdbWriter.
     monkeypatch.setattr(backfill, "existing_partition_dates", lambda p: set())
     monkeypatch.setattr(backfill, "make_fetch_day",
                         lambda *a: (lambda day: [{"tradeID": [1]}]))
-    cfg = backfill.BackfillConfig(symbol="BTCUSDT", venue="binance", days=2,
-                                  chunk_size=10, hdb_path=tmp_path,
-                                  schema_q=tmp_path / "schema.q")
     writer = FakeWriter()
-    summary = backfill.run(cfg, writer=writer)
+    summary = backfill.run(_cfg(tmp_path, days=2), writer=writer)
     assert summary["written"] == 2       # 2 planned days, both written
     assert len(writer.writes) == 2
 
 
+# --- current-day gap bridge ------------------------------------------------
+
+def _fake_universe(monkeypatch, ids):
+    def fetch(symbol, from_id, limit, api_key=None):
+        avail = [i for i in ids if i >= from_id][:limit]
+        return [{"id": i, "price": "1.0", "qty": "1.0", "time": 1, "isBuyerMaker": True}
+                for i in avail]
+    monkeypatch.setattr(backfill.binance_client, "fetch_trades", fetch)
+
+
+def test_bridge_pages_from_floor_and_stops_before_target(monkeypatch, tmp_path):
+    _fake_universe(monkeypatch, range(6, 13))       # ids 6..12 exist
+    writer = FakeWriter(floor=5)
+    summary = backfill.bridge(_cfg(tmp_path), writer, target_id=9, page=2)
+    assert writer.inserted == [6, 7, 8]             # < target 9
+    assert summary["inserted"] == 3
+    assert summary["from_id"] == 6
+
+
+def test_bridge_fills_to_tip_when_no_target(monkeypatch, tmp_path):
+    _fake_universe(monkeypatch, range(6, 10))       # ids 6..9 exist
+    writer = FakeWriter(floor=5)
+    summary = backfill.bridge(_cfg(tmp_path), writer, target_id=None, page=2)
+    assert writer.inserted == [6, 7, 8, 9]
+    assert summary["inserted"] == 4
+
+
+def test_bridge_skips_when_no_stored_id(tmp_path):
+    writer = FakeWriter(floor=None)
+    assert backfill.bridge(_cfg(tmp_path), writer)["inserted"] == 0
+
+
 # --- retention prune -------------------------------------------------------
-
-def _cfg(hdb, days=30):
-    return backfill.BackfillConfig(symbol="BTCUSDT", venue="binance", days=days,
-                                   chunk_size=10, hdb_path=hdb,
-                                   schema_q=hdb / "schema.q")
-
-
-def _mkpart(hdb, name):
-    (hdb / name / "trade").mkdir(parents=True)
-
 
 def test_prune_drops_only_partitions_older_than_window(tmp_path):
     _mkpart(tmp_path, "2026.06.01")   # outside 30d window -> remove
@@ -308,7 +223,6 @@ def test_prune_missing_hdb_is_noop(tmp_path):
 
 
 def test_prune_cutoff_aligns_with_backfill_oldest_no_thrash(tmp_path):
-    # run()'s oldest planned day must never be deleted by prune (same window).
     today = date(2026, 7, 16)
     oldest = backfill.plan_dates(today, 30)[0]           # today-30
     _mkpart(tmp_path, oldest.strftime("%Y.%m.%d"))
