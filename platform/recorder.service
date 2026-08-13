@@ -12,7 +12,7 @@ User=__USER__
 Group=__GROUP__
 WorkingDirectory=__APP_DIR__
 EnvironmentFile=-__APP_DIR__/.env
-ExecStart=__APP_DIR__/venv/bin/python __APP_DIR__/recorder.py
+ExecStart=__APP_DIR__/venv/bin/python __REPO_DIR__/resources/recorder.py
 Restart=always
 RestartSec=5
 # The 4B has more RAM than the 3A+, but a runaway recorder should still be

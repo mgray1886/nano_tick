@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import recorder as recorder_module
-from recorder import Recorder
+from resources import recorder as recorder_module
+from resources.recorder import Recorder
 
 
 class InlineThread:
