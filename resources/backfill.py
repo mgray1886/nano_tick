@@ -5,11 +5,13 @@ parsing/normalising in resources.binance. Two fill paths:
 
 - run(): loads complete archived days ([today-N .. yesterday]) into the HDB,
   idempotent (existing days skipped).
-- bridge(): pages REST /api/v3/trades from the last stored id up to the live
-  stream's first id, filling the current-day gap the archive can't cover.
+- bridge(): pages REST /api/v3/historicalTrades from the last stored id up to
+  the live stream's first id, filling the current-day gap the archive can't
+  cover.
 
-prune() caps the store to a rolling window. HdbWriter needs a licensed q; the
-rest is covered by the tests. Design: platform/KDBX_SETUP.md.
+prune() caps the store to a rolling window; RdbRoller savedowns the RDB at the
+UTC day boundary for the live path. HdbWriter needs a licensed q; the rest is
+covered by the tests. Design: platform/KDBX_SETUP.md.
 """
 import logging
 import os
@@ -123,6 +125,47 @@ class HdbWriter:
         total = sum(self.insert(cols) for cols in chunks)
         self.savedown(day)
         return total
+
+
+# --- live RDB rollover ------------------------------------------------------
+
+def _utc_date(ms: int) -> date:
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).date()
+
+
+class RdbRoller:
+    """Live-path RDB lifecycle: accumulate the current day's ticks in the RDB
+    and savedown the finished day when the feed crosses UTC midnight.
+
+    The day comes from the data (the chunk's last trade time), so the roll
+    fires when the first tick of the new day arrives — no timer needed. A chunk
+    straddling the boundary is negligible for a liquid symbol; an illiquid one
+    could add a midnight timer that calls flush().
+    """
+
+    def __init__(self, writer):
+        self._writer = writer
+        self._current_day: Optional[date] = None
+
+    def feed(self, cols: dict) -> dict:
+        """Insert a live chunk, savedown-ing the previous day first if this
+        chunk has crossed into a new UTC day."""
+        day = _utc_date(cols["time"][-1])
+        rolled = None
+        if self._current_day is not None and day > self._current_day:
+            self._writer.savedown(self._current_day)  # persist + clear finished day
+            rolled = self._current_day
+        self._current_day = day
+        inserted = self._writer.insert(cols)
+        return {"inserted": inserted, "day": day, "rolled": rolled}
+
+    def flush(self) -> Optional[date]:
+        """Savedown the current day (shutdown / manual). Returns it, or None."""
+        if self._current_day is None:
+            return None
+        day, self._current_day = self._current_day, None
+        self._writer.savedown(day)
+        return day
 
 
 # --- config ----------------------------------------------------------------

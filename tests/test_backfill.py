@@ -1,7 +1,7 @@
 import hashlib
 import io
 import zipfile
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pytest
 
@@ -89,11 +89,12 @@ def test_make_fetch_day_returns_none_when_not_published(monkeypatch):
 # --- archive orchestration -------------------------------------------------
 
 class FakeWriter:
-    """Records write_day/insert calls; stands in for HdbWriter (no pykx)."""
+    """Records write_day/insert/savedown calls; stands in for HdbWriter."""
 
     def __init__(self, floor=None):
         self.writes = []
         self.inserted = []
+        self.savedowns = []
         self._floor = floor
 
     def write_day(self, day, chunks):
@@ -104,6 +105,9 @@ class FakeWriter:
     def insert(self, cols):
         self.inserted.extend(cols["tradeID"])
         return len(cols["tradeID"])
+
+    def savedown(self, day):
+        self.savedowns.append(day)
 
     def max_stored_id(self):
         return self._floor
@@ -190,6 +194,53 @@ def test_bridge_fills_to_tip_when_no_target(monkeypatch, tmp_path):
 def test_bridge_skips_when_no_stored_id(tmp_path):
     writer = FakeWriter(floor=None)
     assert backfill.bridge(_cfg(tmp_path), writer)["inserted"] == 0
+
+
+# --- live RDB rollover -----------------------------------------------------
+
+def _ms(y, mo, d, h=12):
+    return int(datetime(y, mo, d, h, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def _chunk(ms, tid):
+    return {"time": [ms], "sym": ["BTCUSDT"], "venue": ["binance"], "tradeID": [tid],
+            "price": [1.0], "qty": [1.0], "eventTime": [ms], "buyerMaker": [False]}
+
+
+def test_roller_first_feed_does_not_roll():
+    w = FakeWriter()
+    res = backfill.RdbRoller(w).feed(_chunk(_ms(2026, 7, 15), 1))
+    assert res == {"inserted": 1, "day": date(2026, 7, 15), "rolled": None}
+    assert w.savedowns == []
+
+
+def test_roller_no_savedown_within_same_day():
+    w = FakeWriter()
+    r = backfill.RdbRoller(w)
+    r.feed(_chunk(_ms(2026, 7, 15, 1), 1))
+    r.feed(_chunk(_ms(2026, 7, 15, 23), 2))
+    assert w.savedowns == []
+    assert w.inserted == [1, 2]
+
+
+def test_roller_savedowns_previous_day_on_boundary():
+    w = FakeWriter()
+    r = backfill.RdbRoller(w)
+    r.feed(_chunk(_ms(2026, 7, 15, 23), 1))
+    res = r.feed(_chunk(_ms(2026, 7, 16, 0), 2))   # crosses midnight
+    assert res["rolled"] == date(2026, 7, 15)
+    assert res["day"] == date(2026, 7, 16)
+    assert w.savedowns == [date(2026, 7, 15)]       # finished day persisted
+    assert w.inserted == [1, 2]
+
+
+def test_roller_flush_savedowns_current_day():
+    w = FakeWriter()
+    r = backfill.RdbRoller(w)
+    r.feed(_chunk(_ms(2026, 7, 15), 1))
+    assert r.flush() == date(2026, 7, 15)
+    assert w.savedowns == [date(2026, 7, 15)]
+    assert r.flush() is None                         # nothing left to persist
 
 
 # --- retention prune -------------------------------------------------------
