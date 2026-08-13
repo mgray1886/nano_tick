@@ -96,3 +96,18 @@ def test_parse_rest_trades():
     assert cols["sym"] == ["BTCUSDT", "BTCUSDT"]
     assert cols["venue"] == ["binance", "binance"]
     assert cols["buyerMaker"] == [True, False]
+
+
+def test_parse_live_ticks():
+    ticks = [{"venue": "binance", "symbol": "BTCUSDT", "trade_id": 5, "price": "1.5",
+              "qty": "2.0", "event_ts": 1700000000001, "trade_ts": 1700000000000,
+              "is_buyer_maker": True}]
+    cols = binance.parse_live_ticks(ticks)
+    assert cols["tradeID"] == [5]
+    assert cols["time"] == [1700000000000]
+    assert cols["eventTime"] == [1700000000001]   # live carries a real emit time
+    assert cols["price"] == [1.5]
+    assert cols["qty"] == [2.0]
+    assert cols["sym"] == ["BTCUSDT"]
+    assert cols["venue"] == ["binance"]
+    assert cols["buyerMaker"] == [True]

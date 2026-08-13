@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 import urllib.error
 import urllib.request
 from datetime import date
@@ -34,6 +35,10 @@ def _get(url: str, timeout: int = HTTP_TIMEOUT, retries: int = HTTP_RETRIES,
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 return None
+            if exc.code in (429, 418):  # rate limited / IP throttled
+                wait = min(int(exc.headers.get("Retry-After", "1")), 60)
+                logger.warning("rate limited (%d); sleeping %ds", exc.code, wait)
+                time.sleep(wait)
             last_exc = exc
         except (urllib.error.URLError, TimeoutError) as exc:
             last_exc = exc

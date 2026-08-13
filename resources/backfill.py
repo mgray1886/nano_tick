@@ -178,7 +178,9 @@ class BackfillConfig:
     chunk_size: int
     hdb_path: Path
     schema_q: Path
-    api_key: Optional[str] = None  # Binance key for the REST bridge (historicalTrades)
+    api_key: Optional[str] = None    # Binance key for the REST bridge (historicalTrades)
+    mqtt_host: str = "192.168.100.2"  # live feed broker (the 4B's own mosquitto)
+    mqtt_port: int = 1883
 
     @classmethod
     def from_env(cls) -> "BackfillConfig":
@@ -190,6 +192,8 @@ class BackfillConfig:
             hdb_path=Path(os.environ.get("HDB_PATH", Path.home() / "nano_tick_hdb")),
             schema_q=Path(__file__).resolve().parent.parent / "platform" / "schema.q",
             api_key=os.environ.get("BINANCE_API_KEY"),
+            mqtt_host=os.environ.get("MQTT_HOST", "192.168.100.2"),
+            mqtt_port=int(os.environ.get("MQTT_PORT", "1883")),
         )
 
 

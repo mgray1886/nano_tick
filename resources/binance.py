@@ -58,7 +58,7 @@ def iter_trade_chunks(
 
 
 def parse_rest_trades(trades: list, symbol: str, venue: str) -> dict:
-    """REST /api/v3/trades JSON -> one column chunk in schema layout."""
+    """REST /api/v3/historicalTrades JSON -> one column chunk in schema layout."""
     cols = _empty_cols()
     for t in trades:
         ts = int(t["time"])
@@ -70,4 +70,20 @@ def parse_rest_trades(trades: list, symbol: str, venue: str) -> dict:
         cols["price"].append(float(t["price"]))
         cols["qty"].append(float(t["qty"]))
         cols["buyerMaker"].append(bool(t["isBuyerMaker"]))
+    return cols
+
+
+def parse_live_ticks(ticks: list) -> dict:
+    """Normalised MQTT ticks (from the 3A+ normaliser) -> one column chunk.
+    Live ticks carry a real emit time, unlike archive/REST."""
+    cols = _empty_cols()
+    for t in ticks:
+        cols["time"].append(int(t["trade_ts"]))
+        cols["eventTime"].append(int(t["event_ts"]))
+        cols["sym"].append(t["symbol"])
+        cols["venue"].append(t["venue"])
+        cols["tradeID"].append(int(t["trade_id"]))
+        cols["price"].append(float(t["price"]))
+        cols["qty"].append(float(t["qty"]))
+        cols["buyerMaker"].append(bool(t["is_buyer_maker"]))
     return cols
