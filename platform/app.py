@@ -3,16 +3,15 @@
 Owns the single KDB-X write connection (schema.q + HdbWriter) and sequences the
 writer role's lifecycle:
 
-  1. startup: ensure recent history is present via an idempotent backfill
-     (`backfill.run`), using the shared writer;
-  2. live (next milestone): consume the MQTT `ticks/#` feed and insertRaw into
-     the same HDB.
+  1. startup: fill the rolling window from the archive (`backfill.run`) and
+     prune anything older, using the shared writer;
+  2. live: hand the same writer to the feedhandler, which REST-bridges the
+     current-day gap then consumes the MQTT `ticks/#` feed into the RDB.
 
-Running startup backfill and the live feed as one process sharing one kdb
-resource mirrors how a small kdb writer is structured (gap-fill on startup,
-then go live). Backfill stays a bounded, separable resource, so it can later
-split into a standalone loader — the kdb-idiomatic split at a firm's scale —
-without reworking this code.
+One process sharing one kdb resource mirrors how a small kdb writer is
+structured (gap-fill on startup, then go live). Each piece stays a bounded,
+separable resource, so they can later split into their own processes — the
+kdb-idiomatic scale-out — without reworking this code.
 
 Run on the 4B (needs a licensed q via pykx):  python platform/app.py
 """
@@ -22,6 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo root for resources/
 from resources import backfill  # noqa: E402
+from resources import feedhandler  # noqa: E402
 
 logging.basicConfig(level="INFO", format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("app")
@@ -33,13 +33,11 @@ def main() -> None:
     writer = backfill.HdbWriter(config.hdb_path, config.schema_q)
 
     logger.info("startup: maintaining a %d-day window in %s", config.days, config.hdb_path)
-    backfill.run(config, writer=writer)   # fill the window
+    backfill.run(config, writer=writer)   # fill the window from the archive
     backfill.prune(config)                # trim anything older than the window
 
-    # TODO(feedhandler milestone): start the live MQTT -> kdb consumer here,
-    # insertRaw-ing into the SAME `writer` so history and live share one HDB.
-    # (A daily timer can also call run()+prune() to keep the window current.)
-    logger.info("window maintained; live feed not yet implemented — exiting")
+    logger.info("starting live feed")
+    feedhandler.FeedHandler(config, writer).run()   # bridge the gap, then go live (blocks)
 
 
 if __name__ == "__main__":

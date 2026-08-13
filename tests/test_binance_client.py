@@ -79,3 +79,21 @@ def test_fetch_trades_empty_when_no_body(monkeypatch):
     monkeypatch.setattr(binance.urllib.request, "urlopen",
                         lambda req, timeout: FakeResp(b""))
     assert binance.fetch_trades("BTCUSDT", from_id=1) == []
+
+
+def test_get_backs_off_on_429_then_succeeds(monkeypatch):
+    calls = []
+
+    def urlopen(req, timeout):
+        calls.append(1)
+        if len(calls) == 1:
+            raise binance.urllib.error.HTTPError(
+                req.full_url, 429, "rate", {"Retry-After": "0"}, None)
+        return FakeResp(b"ok")
+
+    monkeypatch.setattr(binance.urllib.request, "urlopen", urlopen)
+    slept = []
+    monkeypatch.setattr(binance.time, "sleep", lambda s: slept.append(s))
+    assert binance._get("http://x") == b"ok"
+    assert len(calls) == 2      # retried after the 429
+    assert slept == [0]         # honoured Retry-After
