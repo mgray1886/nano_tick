@@ -34,6 +34,8 @@ class FeedHandler:
         self._last_id = None
         self._dropped = 0
         self._stop = False
+        self._connected_once = False   # first connect vs reconnect
+        self._needs_rebridge = False   # set by paho thread on reconnect, handled on main
         self._client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
             client_id="nano_tick_feedhandler",
@@ -46,8 +48,16 @@ class FeedHandler:
     # --- paho network thread: enqueue only, never touch kdb --------------
 
     def _on_connect(self, client, userdata, flags, reason_code, properties) -> None:
-        logger.info("connected to broker (%s), subscribing to ticks/#", reason_code)
         client.subscribe("ticks/#", qos=1)
+        if self._connected_once:
+            # A reconnect: the broker may have dropped messages during a long
+            # outage. Flag the main thread to REST-bridge any gap (kdb is
+            # single-threaded, so this callback must not bridge itself).
+            logger.warning("reconnected to broker; will re-bridge any gap")
+            self._needs_rebridge = True
+        else:
+            self._connected_once = True
+            logger.info("connected to broker (%s), subscribing to ticks/#", reason_code)
 
     def _on_message(self, client, userdata, msg) -> None:
         try:
@@ -89,6 +99,23 @@ class FeedHandler:
                 break
         return batch
 
+    def _maybe_rebridge(self, batch: list) -> None:
+        """After a reconnect, if the first genuinely-new tick jumps past
+        last_id+1 the broker dropped messages during the outage — REST-bridge
+        the gap [last_id+1 .. first_new). Only clears the flag once a new tick
+        has actually arrived, so stale backlog can't clear it prematurely."""
+        new_ids = [t["trade_id"] for t in batch
+                   if self._last_id is None or t["trade_id"] > self._last_id]
+        if not new_ids:
+            return  # only stale/duplicate ticks so far; keep waiting
+        first_new = min(new_ids)
+        if self._last_id is not None and first_new > self._last_id + 1:
+            logger.warning("reconnect gap [%d .. %d); bridging via REST",
+                           self._last_id + 1, first_new)
+            backfill.bridge(self._config, self._writer, target_id=first_new)
+            self._last_id = self._writer.max_stored_id()
+        self._needs_rebridge = False
+
     def run(self) -> None:
         for sig in (signal.SIGTERM, signal.SIGINT):
             try:
@@ -118,7 +145,10 @@ class FeedHandler:
                 nxt = self._queue.get(timeout=BATCH_TIMEOUT)
             except queue.Empty:
                 continue
-            self._apply(self._drain(nxt))
+            batch = self._drain(nxt)
+            if self._needs_rebridge:
+                self._maybe_rebridge(batch)
+            self._apply(batch)
 
         self._shutdown()
 

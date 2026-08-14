@@ -22,13 +22,21 @@ class FakeRoller:
         pass
 
 
+class FakeWriter:
+    def __init__(self, mid=None):
+        self._mid = mid
+
+    def max_stored_id(self):
+        return self._mid
+
+
 def tick(tid, ms=1700000000000):
     return {"venue": "binance", "symbol": "BTCUSDT", "trade_id": tid, "price": "1.0",
             "qty": "1.0", "event_ts": ms, "trade_ts": ms, "is_buyer_maker": False}
 
 
-def _fh(roller):
-    return feedhandler.FeedHandler(_cfg(), writer=None, roller=roller)
+def _fh(roller, writer=None):
+    return feedhandler.FeedHandler(_cfg(), writer=writer, roller=roller)
 
 
 def test_apply_sorts_dedups_and_tracks_last_id():
@@ -73,3 +81,52 @@ def test_drain_coalesces_queued_ticks():
     fh._queue.put(tick(3))
     batch = fh._drain(tick(1))
     assert [t["trade_id"] for t in batch] == [1, 2, 3]
+
+
+# --- reconnect re-bridge ---------------------------------------------------
+
+def _client():
+    return SimpleNamespace(subscribe=lambda *a, **k: None)
+
+
+def test_on_connect_flags_rebridge_only_on_reconnect():
+    fh = _fh(FakeRoller())
+    fh._on_connect(_client(), None, None, "ok", None)          # first connect
+    assert fh._connected_once is True and fh._needs_rebridge is False
+    fh._on_connect(_client(), None, None, "ok", None)          # reconnect
+    assert fh._needs_rebridge is True
+
+
+def test_maybe_rebridge_bridges_and_refreshes_on_gap(monkeypatch):
+    fh = _fh(FakeRoller(), writer=FakeWriter(mid=104))
+    fh._last_id = 100
+    fh._needs_rebridge = True
+    calls = []
+    monkeypatch.setattr(feedhandler.backfill, "bridge",
+                        lambda cfg, w, target_id=None: calls.append(target_id))
+    fh._maybe_rebridge([tick(105), tick(106)])   # first new 105 > last+1 -> gap
+    assert calls == [105]
+    assert fh._last_id == 104                     # refreshed from writer
+    assert fh._needs_rebridge is False
+
+
+def test_maybe_rebridge_no_bridge_when_contiguous(monkeypatch):
+    fh = _fh(FakeRoller(), writer=FakeWriter(mid=100))
+    fh._last_id = 100
+    fh._needs_rebridge = True
+    calls = []
+    monkeypatch.setattr(feedhandler.backfill, "bridge", lambda *a, **k: calls.append(1))
+    fh._maybe_rebridge([tick(101)])               # contiguous -> no gap
+    assert calls == []
+    assert fh._needs_rebridge is False
+
+
+def test_maybe_rebridge_keeps_flag_when_only_stale(monkeypatch):
+    fh = _fh(FakeRoller(), writer=FakeWriter())
+    fh._last_id = 100
+    fh._needs_rebridge = True
+    calls = []
+    monkeypatch.setattr(feedhandler.backfill, "bridge", lambda *a, **k: calls.append(1))
+    fh._maybe_rebridge([tick(99), tick(100)])     # all stale -> keep waiting
+    assert calls == []
+    assert fh._needs_rebridge is True
