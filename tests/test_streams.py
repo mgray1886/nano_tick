@@ -2,7 +2,7 @@ import asyncio
 import json
 
 from src.streams import base
-from src.streams.binance import BinanceTradeStream
+from src.streams.binance import BinanceCombinedStream, BinanceTradeStream
 
 
 class FakeConnection:
@@ -72,6 +72,13 @@ async def take(stream, n):
 
 def test_binance_trade_stream_url_lowercases_symbol():
     assert BinanceTradeStream("BTCUSDT").url() == "wss://stream.binance.com:9443/ws/btcusdt@trade"
+
+
+def test_binance_combined_stream_url():
+    assert BinanceCombinedStream("BTCUSDT").url() == (
+        "wss://stream.binance.com:9443/stream?streams=btcusdt@trade/btcusdt@bookTicker")
+    assert BinanceCombinedStream("BTCUSDT", quotes=False).url() == (
+        "wss://stream.binance.com:9443/stream?streams=btcusdt@trade")
 
 
 def test_messages_yields_parsed_json(monkeypatch):

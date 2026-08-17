@@ -6,6 +6,7 @@ from dataclasses import dataclass
 class Config:
     log_level: str
     symbol: str
+    stream_quotes: bool  # also stream @bookTicker quotes alongside trades
     sink_type: str  # "mqtt" (default) or "tcp" (legacy fallback)
     mqtt_host: str
     mqtt_port: int
@@ -20,6 +21,7 @@ class Config:
         return cls(
             log_level=os.environ.get("LOG_LEVEL", "INFO"),
             symbol=os.environ.get("SYMBOL", "btcusdt"),
+            stream_quotes=os.environ.get("STREAM_QUOTES", "true").lower() != "false",
             sink_type=os.environ.get("SINK_TYPE", "mqtt"),
             mqtt_host=os.environ.get("MQTT_HOST", "192.168.100.2"),
             mqtt_port=int(os.environ.get("MQTT_PORT", "1883")),

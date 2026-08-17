@@ -56,8 +56,8 @@ class MqttSink:
         self._client.disconnect()
         self._client.loop_stop()
 
-    def send(self, message: dict) -> None:
-        topic = f"ticks/{message['venue']}/{message['symbol'].lower()}"
+    def send(self, message: dict, topic_root: str = "ticks") -> None:
+        topic = f"{topic_root}/{message['venue']}/{message['symbol'].lower()}"
         info = self._client.publish(topic, json.dumps(message), qos=1)
         if info.rc == mqtt.MQTT_ERR_QUEUE_SIZE:
             self._dropped += 1

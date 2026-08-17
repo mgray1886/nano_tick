@@ -66,6 +66,12 @@ def test_send_publishes_to_venue_symbol_topic_at_qos1(monkeypatch):
     assert json.loads(payload) == TICK
 
 
+def test_send_topic_root_routes_quotes(monkeypatch):
+    sink = make_sink(monkeypatch)
+    sink.send(TICK, topic_root="quotes")
+    assert sink._client.published[0][0] == "quotes/binance/btcusdt"
+
+
 def test_constructor_configures_queue_cap_and_reconnect(monkeypatch):
     sink = make_sink(monkeypatch, max_queued_messages=1234)
     assert sink._client.queue_capacity == 1234

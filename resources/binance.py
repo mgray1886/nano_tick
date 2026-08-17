@@ -17,6 +17,13 @@ def _empty_cols() -> dict:
     return {c: [] for c in COLUMNS}
 
 
+def _to_millis(ts: int) -> int:
+    """Normalise a Binance timestamp to milliseconds. Daily archives use
+    MICROSECONDS (16 digits); REST/websocket use milliseconds (13). schema.q's
+    ms2ts expects ms, so anything above the ms range is scaled down."""
+    return ts // 1000 if ts > 10 ** 14 else ts
+
+
 def verify_checksum(zip_bytes: bytes, checksum_text: str) -> bool:
     """Binance .CHECKSUM files are '<sha256>  <filename>'."""
     expected = checksum_text.split()[0].strip().lower()
@@ -39,7 +46,7 @@ def iter_trade_chunks(
             for row in reader:
                 if not row or not row[_ID].lstrip("-").isdigit():
                     continue  # blank line or header row
-                ts = int(row[_TIME])
+                ts = _to_millis(int(row[_TIME]))  # archive is microseconds
                 cols["time"].append(ts)
                 cols["eventTime"].append(ts)  # archive has no emit time; use trade time
                 cols["sym"].append(symbol)
@@ -61,7 +68,7 @@ def parse_rest_trades(trades: list, symbol: str, venue: str) -> dict:
     """REST /api/v3/historicalTrades JSON -> one column chunk in schema layout."""
     cols = _empty_cols()
     for t in trades:
-        ts = int(t["time"])
+        ts = _to_millis(int(t["time"]))
         cols["time"].append(ts)
         cols["eventTime"].append(ts)  # REST trades carry only trade time
         cols["sym"].append(symbol)
@@ -78,8 +85,8 @@ def parse_live_ticks(ticks: list) -> dict:
     Live ticks carry a real emit time, unlike archive/REST."""
     cols = _empty_cols()
     for t in ticks:
-        cols["time"].append(int(t["trade_ts"]))
-        cols["eventTime"].append(int(t["event_ts"]))
+        cols["time"].append(_to_millis(int(t["trade_ts"])))
+        cols["eventTime"].append(_to_millis(int(t["event_ts"])))
         cols["sym"].append(t["symbol"])
         cols["venue"].append(t["venue"])
         cols["tradeID"].append(int(t["trade_id"]))

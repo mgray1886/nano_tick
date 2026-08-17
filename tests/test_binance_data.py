@@ -58,6 +58,14 @@ def test_iter_trade_chunks_without_header():
     assert chunks[0]["tradeID"] == [100]
 
 
+def test_iter_trade_chunks_converts_microsecond_time_to_millis():
+    # Binance daily archives moved to 16-digit microsecond timestamps.
+    csv_text = csv_row(1, 1.0, 1.0, 1786492800239454, True)  # micros
+    chunks = list(binance.iter_trade_chunks(make_zip(csv_text), "BTCUSDT", "binance"))
+    assert chunks[0]["time"] == [1786492800239]              # -> milliseconds
+    assert chunks[0]["eventTime"] == [1786492800239]
+
+
 def test_iter_trade_chunks_respects_chunk_size():
     rows = [csv_row(i, 1.0, 1.0, 1700000000000 + i, True) for i in range(5)]
     chunks = list(binance.iter_trade_chunks(
