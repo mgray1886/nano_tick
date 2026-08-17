@@ -3,10 +3,10 @@ import logging
 import signal
 
 from src.config import Config
-from src.normalisers.binance import normalize_trade
+from src.normalisers.binance import normalize_quote, normalize_trade
 from src.sinks.mqtt import MqttSink
 from src.sinks.tcp import TcpSink
-from src.streams.binance import BinanceTradeStream
+from src.streams.binance import BinanceCombinedStream
 
 Sink = MqttSink | TcpSink
 
@@ -33,12 +33,17 @@ def start_sink(config: Config) -> Sink:
 
 
 async def run(config: Config, sink: Sink) -> None:
-    stream = BinanceTradeStream(config.symbol)
-    async for raw in stream.messages():
+    stream = BinanceCombinedStream(config.symbol, quotes=config.stream_quotes)
+    async for msg in stream.messages():
         try:
-            sink.send(normalize_trade(raw))
+            # Combined-stream messages are wrapped: {"stream": ..., "data": ...}
+            stream_name, data = msg["stream"], msg["data"]
+            if stream_name.endswith("@trade"):
+                sink.send(normalize_trade(data), topic_root="ticks")
+            elif stream_name.endswith("@bookTicker"):
+                sink.send(normalize_quote(data), topic_root="quotes")
         except Exception:
-            logger.exception("dropping message that failed to normalise: %r", raw)
+            logger.exception("dropping message that failed to normalise: %r", msg)
 
 
 async def main() -> None:

@@ -70,7 +70,8 @@ class TcpSink:
         if undelivered:
             logger.warning("shutting down with %d unacked ticks in buffer", undelivered)
 
-    def send(self, message: dict) -> None:
+    def send(self, message: dict, topic_root: str = "ticks") -> None:
+        # topic_root is ignored: the legacy TCP path is a single trade stream.
         line = json.dumps({"seq": self._next_seq, **message}).encode() + b"\n"
         self._unsent.append((self._next_seq, line))
         self._next_seq += 1
