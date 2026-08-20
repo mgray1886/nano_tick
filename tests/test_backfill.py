@@ -159,6 +159,14 @@ def test_config_from_env_overrides(monkeypatch):
     assert cfg.days == 3
 
 
+def test_run_with_zero_days_is_noop(tmp_path):
+    # days=0 -> empty date plan; run() must not crash (regression: dates[0] IndexError)
+    writer = FakeWriter()
+    summary = backfill.run(_cfg(tmp_path, days=0), writer=writer)
+    assert summary == {"written": 0, "rows": 0, "skipped": 0, "missing": 0, "failed": 0}
+    assert writer.writes == []
+
+
 def test_run_uses_injected_writer_without_touching_kdb(monkeypatch, tmp_path):
     monkeypatch.setattr(backfill, "existing_partition_dates", lambda p: set())
     monkeypatch.setattr(backfill, "make_fetch_day",
