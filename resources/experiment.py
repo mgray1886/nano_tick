@@ -24,6 +24,7 @@ from datetime import timedelta
 
 import pandas as pd
 
+from resources.alpha import ImbalanceAlpha
 from resources.evaluation import DEFAULT_FEATURES, evaluate
 from resources.reader import HdbReader, ReaderConfig, coerce_date
 
@@ -64,13 +65,14 @@ def load_features(reader, symbol: str, days: list, bar_seconds: int,
 
 
 def format_report(result, *, symbol: str, days: list, bar_seconds: int,
-                  horizon: int, window: int, cost: float, label_mix: dict) -> str:
+                  horizon: int, window: int, cost: float, label_mix: dict,
+                  alpha: str = "logistic") -> str:
     """Human-readable summary of an EvaluationResult."""
     lines = [
         "nano_tick walk-forward experiment",
         f"  symbol={symbol}  dates={days[0]}..{days[-1]} "
         f"({len(days)} day(s), {result.n_samples} rows)",
-        f"  bar={bar_seconds}s  horizon={horizon}  window={window}  cost={cost}",
+        f"  alpha={alpha}  bar={bar_seconds}s  horizon={horizon}  window={window}  cost={cost}",
         f"  label mix: {label_mix}",
         f"  features: {', '.join(result.feature_cols)}",
         f"  folds={result.n_folds} (skipped {result.n_skipped})",
@@ -120,6 +122,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cost", type=float, default=cfg.cost, help="round-trip cost as a return")
     p.add_argument("--n-splits", type=int, default=5)
     p.add_argument("--embargo", type=int, default=0, help="extra bars purged before each test block")
+    p.add_argument("--alpha", choices=["logistic", "imbalance"], default="logistic",
+                   help="signal to evaluate: logistic (StandardScaler+LogReg) or "
+                        "imbalance (order-flow/quote microstructure rule)")
     p.add_argument("--features", help="comma-separated feature columns (default: the standard set)")
     p.add_argument("--hdb", default=str(cfg.hdb_path), help="HDB path")
     p.add_argument("--analytics", default=str(cfg.analytics_q), help="analytics.q path")
@@ -139,12 +144,13 @@ def main(argv: list) -> int:
     df = load_features(reader, args.symbol, days, args.bar_seconds,
                        args.horizon, args.window, args.cost)
     label_mix = {int(k): int(v) for k, v in df["label"].value_counts().sort_index().items()}
-    result = evaluate(df, n_splits=args.n_splits, horizon=args.horizon,
+    factory = (lambda: ImbalanceAlpha(features)) if args.alpha == "imbalance" else None
+    result = evaluate(df, model_factory=factory, n_splits=args.n_splits, horizon=args.horizon,
                       embargo=args.embargo, cost=args.cost, feature_cols=features)
 
     if args.json:
         print(json.dumps({
-            "symbol": args.symbol, "start": str(days[0]), "end": str(days[-1]),
+            "symbol": args.symbol, "alpha": args.alpha, "start": str(days[0]), "end": str(days[-1]),
             "bar_seconds": args.bar_seconds, "horizon": args.horizon,
             "window": args.window, "cost": args.cost, "embargo": args.embargo,
             "label_mix": label_mix, **asdict(result),
@@ -152,7 +158,8 @@ def main(argv: list) -> int:
     else:
         print(format_report(result, symbol=args.symbol, days=days,
                             bar_seconds=args.bar_seconds, horizon=args.horizon,
-                            window=args.window, cost=args.cost, label_mix=label_mix))
+                            window=args.window, cost=args.cost, label_mix=label_mix,
+                            alpha=args.alpha))
     return 0
 
 
