@@ -67,8 +67,27 @@ quoteBarsOf:{[q;sz]
          qimb: (bidSize-askSize) % (bidSize+askSize)
     from b }
 
-quoteBars:{[s;d;sz]
+/ Re-aggregate stored quote bars (raw last bid/ask/size) into width `sz`, then
+/ derive mid/spread/micro/qimb — same output columns as quoteBarsOf. Because
+/ each field is the LAST in the bucket, coarsening is EXACT (no aggregation).
+rebucketQuoteBars:{[qb;sz]
+  b: select bid:last bid, ask:last ask, bidSize:last bidSize, askSize:last askSize
+     by bar: sz xbar time from qb;
+  update mid: 0.5*bid+ask, spread: ask-bid,
+         micro: ((bid*askSize)+(ask*bidSize)) % (bidSize+askSize),
+         qimb: (bidSize-askSize) % (bidSize+askSize)
+    from b }
+
+quoteBarsFromQuotes:{[s;d;sz]
   quoteBarsOf[select time,bid,ask,bidSize,askSize from quote where date=d, sym=s; sz] }
+
+/ Quote-feature bars for one symbol/day. Prefers the materialised `quoteBar`
+/ table (schema.q savedown builds it, ~1440 rows, re-bucketed to sz); falls back
+/ to scanning `quote` when the HDB has no quote bars.
+quoteBars:{[s;d;sz]
+  $[`quoteBar in tables[];
+    $[0<count b:select from quoteBar where date=d, sym=s; rebucketQuoteBars[b; sz]; quoteBarsFromQuotes[s;d;sz]];
+    quoteBarsFromQuotes[s;d;sz]] }
 
 / --- as-of join (the kdb showcase) --------------------------------------
 / Enrich each trade with the PREVAILING (nearest-earlier) quote. aj matches
