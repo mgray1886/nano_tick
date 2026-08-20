@@ -172,7 +172,7 @@ def test_run_uses_injected_writer_without_touching_kdb(monkeypatch, tmp_path):
 # --- current-day gap bridge ------------------------------------------------
 
 def _fake_universe(monkeypatch, ids):
-    def fetch(symbol, from_id, limit, api_key=None):
+    def fetch(symbol, from_id, limit, api_key=None, pacer=None):
         avail = [i for i in ids if i >= from_id][:limit]
         return [{"id": i, "price": "1.0", "qty": "1.0", "time": 1, "isBuyerMaker": True}
                 for i in avail]
@@ -199,6 +199,24 @@ def test_bridge_fills_to_tip_when_no_target(monkeypatch, tmp_path):
 def test_bridge_skips_when_no_stored_id(tmp_path):
     writer = FakeWriter(floor=None)
     assert backfill.bridge(_cfg(tmp_path), writer)["inserted"] == 0
+
+
+def test_bridge_paces_every_fetch(monkeypatch, tmp_path):
+    # every REST page must go through a (non-None) shared pacer, so a large
+    # cold-start backfill stays under the request-weight cap
+    seen = []
+
+    def fetch(symbol, from_id, limit, api_key=None, pacer=None):
+        seen.append(pacer)
+        avail = [i for i in range(6, 20) if i >= from_id][:limit]
+        return [{"id": i, "price": "1.0", "qty": "1.0", "time": 1, "isBuyerMaker": True}
+                for i in avail]
+
+    monkeypatch.setattr(backfill.binance_client, "fetch_trades", fetch)
+    backfill.bridge(_cfg(tmp_path), FakeWriter(floor=5), page=5)
+    assert len(seen) >= 2                       # multiple pages
+    assert all(p is not None for p in seen)     # each paced
+    assert len(set(map(id, seen))) == 1         # the SAME pacer instance across pages
 
 
 # --- live RDB rollover -----------------------------------------------------
