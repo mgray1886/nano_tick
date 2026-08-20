@@ -83,6 +83,26 @@ assert("first fwdRet uses FUTURE mid (log 102%101)";1e-8>abs (first exec fwdRet 
 assert("last fwdRet uses FUTURE mid (log 105%104)"; 1e-8>abs (last exec fwdRet from ft)-log 105%104);
 assert("all labels +1 (up-move beats cost)";        all 1=exec label from ft);
 
+/ --- 7. rebucketBars: coarsen stored base bars -----------------------
+/ 4 one-minute bars -> 2 two-minute bars; check the aggregation is faithful.
+-1"[7] rebucketBars (coarsen stored bars)";
+bb:([] time:2026.08.12D00:00 2026.08.12D00:01 2026.08.12D00:02 2026.08.12D00:03;
+       sym:4#`BTCUSDT;
+       open:100 101 102 103f; high:101 103 104 105f; low:99 100 101 102f;
+       close:101 102 103 104f; vwap:100.5 101.5 102.5 103.5;
+       vol:1 2 1 2f; trades:1 1 1 1; buyVol:1 0 1 0f; sellVol:0 2 0 2f);
+rb:0!rebucketBars[bb; 0D00:02];
+assert("2 coarse bars";          2=count rb);
+c0:rb 0;
+assert("open = first";           c0[`open]=100f);
+assert("close = last in bucket"; c0[`close]=102f);
+assert("high = max";             c0[`high]=103f);
+assert("low = min";              c0[`low]=99f);
+assert("vol = sum";              c0[`vol]=3f);
+assert("trades = sum";           c0[`trades]=2);
+assert("vwap vol-weighted";      1e-8>abs c0[`vwap]-((100.5*1)+(101.5*2))%3);
+assert("imbalance (b-s)%vol";    1e-8>abs c0[`imbalance]+1%3);
+
 -1"";
 if[fails>0; -2 (string fails)," CHECK(S) FAILED"; exit 1];
 -1"ALL ANALYTICS CHECKS PASSED.";

@@ -24,8 +24,26 @@ barsOf:{[t;sz]
   from t }
 
 / --- HDB entry points (partition-pruned by date) --------------------------
-/ OHLCV+feature bars for one symbol/day:  bars[`BTCUSDT; 2026.08.13; 0D00:01]
-bars:{[s;d;sz] barsOf[select time,price,qty,buyerMaker from trade where date=d, sym=s; sz] }
+/ Re-aggregate stored base bars into width `sz` (same columns as barsOf): 1:1 at
+/ the stored granularity, coarser sz merges buckets. vwap is vol-weighted (each
+/ stored bar's vwap*vol is that bucket's price*qty sum), imbalance recomputed.
+rebucketBars:{[b;sz]
+  select open:first open, high:max high, low:min low, close:last close,
+         vwap:vol wavg vwap, vol:sum vol, trades:sum trades,
+         buyVol:sum buyVol, sellVol:sum sellVol,
+         imbalance:%[(sum buyVol)-sum sellVol; sum vol]
+    by bar:sz xbar time from b }
+
+barsFromTrades:{[s;d;sz] barsOf[select time,price,qty,buyerMaker from trade where date=d, sym=s; sz] }
+
+/ OHLCV+feature bars for one symbol/day:  bars[`BTCUSDT; 2026.08.13; 0D00:01].
+/ Prefers the materialised `bar` table (schema.q savedown builds it, ~1440
+/ rows/day, re-bucketed to sz); falls back to scanning `trade` when the HDB
+/ predates bar materialisation or a day is present only as trades.
+bars:{[s;d;sz]
+  $[`bar in tables[];
+    $[0<count b:select from bar where date=d, sym=s; rebucketBars[b; sz]; barsFromTrades[s;d;sz]];
+    barsFromTrades[s;d;sz]] }
 
 / Whole-day VWAP for a symbol. Aggregate with `select` (map-reduces over
 / partitions), then pull the scalar — `exec agg from <partitioned>` is 'nyi.
