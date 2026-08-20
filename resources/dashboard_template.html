@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nano_tick — candles</title>
+<style>
+  :root {
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --bg: #0a0e13; --panel: #111820; --panel-2: #0d131b; --ink: #e6edf3;
+    --muted: #8b97a5; --faint: #5a6673; --border: rgba(125,139,153,0.16);
+    --grid: rgba(125,139,153,0.10); --accent: #5aa9e6; --up: #2ebd85; --down: #e5484d;
+    --shadow: 0 1px 0 rgba(255,255,255,0.03) inset, 0 12px 32px rgba(0,0,0,0.35);
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f6f8fb; --panel: #ffffff; --panel-2: #eef2f6; --ink: #0e141b;
+      --muted: #566373; --faint: #8b97a5; --border: rgba(60,72,88,0.16);
+      --grid: rgba(60,72,88,0.09); --accent: #2b6cb0; --up: #14855f; --down: #cf3a3f;
+      --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 10px 28px rgba(16,24,40,0.08);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0a0e13; --panel: #111820; --panel-2: #0d131b; --ink: #e6edf3;
+    --muted: #8b97a5; --faint: #5a6673; --border: rgba(125,139,153,0.16);
+    --grid: rgba(125,139,153,0.10); --accent: #5aa9e6; --up: #2ebd85; --down: #e5484d;
+    --shadow: 0 1px 0 rgba(255,255,255,0.03) inset, 0 12px 32px rgba(0,0,0,0.35);
+  }
+  :root[data-theme="light"] {
+    --bg: #f6f8fb; --panel: #ffffff; --panel-2: #eef2f6; --ink: #0e141b;
+    --muted: #566373; --faint: #8b97a5; --border: rgba(60,72,88,0.16);
+    --grid: rgba(60,72,88,0.09); --accent: #2b6cb0; --up: #14855f; --down: #cf3a3f;
+    --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 10px 28px rgba(16,24,40,0.08);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans);
+         -webkit-font-smoothing: antialiased; line-height: 1.45; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 28px 20px 48px; }
+  header { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase;
+             color: var(--accent); margin: 0 0 6px; }
+  h1 { margin: 0; font-size: 22px; font-weight: 650; letter-spacing: -0.01em;
+       display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  h1 .sym { font-family: var(--mono); }
+  h1 .ctx { font-family: var(--mono); font-size: 13px; font-weight: 500; color: var(--muted); letter-spacing: 0; }
+  .toggle, .ctl { font-family: var(--mono); font-size: 12px; color: var(--muted); background: var(--panel);
+            border: 1px solid var(--border); border-radius: 8px; padding: 7px 12px; cursor: pointer;
+            display: inline-flex; align-items: center; gap: 7px; }
+  .toggle:hover, .ctl:hover { color: var(--ink); border-color: var(--accent); }
+  .ctl.on { color: var(--accent); border-color: var(--accent); }
+  .toggle:focus-visible, .ctl:focus-visible, .seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); gap: 1px;
+           margin: 22px 0 16px; background: var(--border); border: 1px solid var(--border);
+           border-radius: 12px; overflow: hidden; }
+  .stat { background: var(--panel); padding: 12px 14px; }
+  .stat .k { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint); }
+  .stat .v { font-family: var(--mono); font-size: 16px; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .stat .v.big { font-size: 20px; font-weight: 600; }
+  .up { color: var(--up); } .down { color: var(--down); }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+          box-shadow: var(--shadow); padding: 10px 8px 6px; }
+  .toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 0 4px 10px; }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .seg button { font-family: var(--mono); font-size: 12px; padding: 6px 12px; background: var(--panel);
+                color: var(--muted); border: 0; border-right: 1px solid var(--border); cursor: pointer; }
+  .seg button:last-child { border-right: 0; }
+  .seg button.on { background: var(--accent); color: #fff; }
+  .seg button:hover:not(.on) { color: var(--ink); }
+  .hint { font-family: var(--mono); font-size: 11px; color: var(--faint); }
+  .zoom { display: inline-flex; gap: 6px; margin-left: auto; }
+  .zoom .ctl { padding: 6px 10px; min-width: 32px; justify-content: center; }
+  .chartwrap { position: relative; }
+  canvas { display: block; width: 100%; height: 460px; border-radius: 8px; cursor: crosshair; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; padding: 8px 12px 4px;
+            font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
+  .legend .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  .legend .line { display: inline-block; width: 14px; height: 0; border-top: 2px solid var(--accent); margin-right: 6px; vertical-align: 3px; }
+  .tip { position: absolute; pointer-events: none; z-index: 5; opacity: 0; transition: opacity .08s;
+         background: var(--panel-2); border: 1px solid var(--border); border-radius: 9px; box-shadow: var(--shadow);
+         padding: 9px 11px; min-width: 150px; font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .tip .t { color: var(--muted); font-size: 11px; margin-bottom: 6px; letter-spacing: 0.02em; }
+  .tip .row { display: flex; justify-content: space-between; gap: 18px; }
+  .tip .row span:first-child { color: var(--faint); }
+  .tip .mk { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); color: var(--accent); }
+  footer { margin-top: 20px; font-family: var(--mono); font-size: 11.5px; color: var(--faint);
+           display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  footer code { color: var(--muted); }
+  @media (prefers-reduced-motion: reduce) { .tip { transition: none; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <p class="eyebrow">nano_tick · HdbReader.bars</p>
+      <h1><span class="sym" id="h-sym">—</span><span class="ctx" id="h-ctx"></span></h1>
+    </div>
+    <button class="toggle" id="themeBtn" aria-label="Toggle colour theme">
+      <span id="themeIcon">◐</span><span id="themeLabel">Theme</span>
+    </button>
+  </header>
+
+  <section class="stats" id="stats" aria-label="Session summary"></section>
+
+  <div class="card">
+    <div class="toolbar">
+      <div class="seg" id="typeSeg" role="group" aria-label="Chart type">
+        <button data-type="candles" class="on">Candles</button>
+        <button data-type="hollow">Hollow</button>
+        <button data-type="line">Line</button>
+      </div>
+      <button class="ctl on" id="smaBtn" aria-pressed="true">SMA <span id="smaN">14</span></button>
+      <span class="hint">scroll to zoom · drag to pan</span>
+      <div class="zoom" role="group" aria-label="Zoom">
+        <button class="ctl" id="zoomOut" aria-label="Zoom out">−</button>
+        <button class="ctl" id="zoomIn" aria-label="Zoom in">+</button>
+        <button class="ctl" id="zoomReset">Reset</button>
+      </div>
+    </div>
+    <div class="chartwrap">
+      <canvas id="chart" aria-label="Candlestick chart with volume"></canvas>
+      <div class="tip" id="tip"></div>
+    </div>
+    <div class="legend">
+      <span><span class="swatch" style="background:var(--up)"></span>up</span>
+      <span><span class="swatch" style="background:var(--down)"></span>down</span>
+      <span><span class="line"></span>SMA</span>
+      <span id="mkLegend" style="display:none"><span class="swatch" style="background:var(--accent)"></span>markers</span>
+    </div>
+  </div>
+
+  <footer>
+    <span id="foot-src">generated via <code>HdbReader.bars</code></span>
+    <span id="foot-note">candles = tick OHLCV</span>
+  </footer>
+</div>
+
+<script>
+  const PAYLOAD = __PAYLOAD__;
+  const meta = PAYLOAD.meta;
+  const bars = PAYLOAD.ohlcv.map(([t, o, h, l, c, v]) => ({ t, o, h, l, c, v }));
+  const MARKERS = PAYLOAD.markers || [];
+  const SMA_N = PAYLOAD.sma || 14;
+
+  const first = bars[0], last = bars[bars.length - 1];
+  const dayHigh = Math.max(...bars.map(b => b.h));
+  const dayLow = Math.min(...bars.map(b => b.l));
+  const vol = bars.reduce((s, b) => s + b.v, 0);
+  const chg = last.c - first.o, chgPct = (chg / first.o) * 100, range = dayHigh - dayLow;
+
+  const sma = bars.map((_, i) => {
+    if (i < SMA_N - 1) return null;
+    let s = 0; for (let j = i - SMA_N + 1; j <= i; j++) s += bars[j].c;
+    return s / SMA_N;
+  });
+
+  function nearestIdx(t) {
+    let best = 0, bd = Infinity;
+    for (let i = 0; i < bars.length; i++) { const d = Math.abs(bars[i].t - t); if (d < bd) { bd = d; best = i; } }
+    return best;
+  }
+  const markerByBar = {};
+  MARKERS.forEach(m => { const i = nearestIdx(m.t); (markerByBar[i] = markerByBar[i] || []).push(m); });
+
+  const fmt = (n, d = 2) => n.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d });
+  const fmtTime = ms => new Date(ms).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" });
+  const fmtDate = ms => new Date(ms).toLocaleDateString("en-GB", { day: "2-digit", month: "short", timeZone: "UTC" });
+  const sgn = n => (n > 0 ? "+" : ""), dir = n => (n > 0 ? "up" : n < 0 ? "down" : "");
+  function hexA(hex, a) {
+    hex = hex.replace("#", ""); if (hex.length === 3) hex = hex.split("").map(c => c + c).join("");
+    const n = parseInt(hex, 16); return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+  }
+
+  document.title = `${meta.symbol} · nano_tick candles`;
+  document.getElementById("h-sym").textContent = meta.symbol;
+  document.getElementById("h-ctx").textContent =
+    `${meta.bar_seconds}s candles · ${meta.range || meta.day} · ${bars.length} bars`;
+  document.getElementById("smaN").textContent = SMA_N;
+  document.getElementById("foot-note").textContent = meta.note || "candles = tick OHLCV";
+  if (MARKERS.length) document.getElementById("mkLegend").style.display = "";
+
+  document.getElementById("stats").innerHTML = [
+    { k: "Last", v: fmt(last.c), cls: dir(chg), big: true },
+    { k: "Change", v: `${sgn(chg)}${fmt(chg)}`, cls: dir(chg) },
+    { k: "Change %", v: `${sgn(chgPct)}${fmt(chgPct)}%`, cls: dir(chg) },
+    { k: "Open", v: fmt(first.o) }, { k: "High", v: fmt(dayHigh) }, { k: "Low", v: fmt(dayLow) },
+    { k: "Range", v: fmt(range) }, { k: "Volume", v: fmt(vol, 2) },
+  ].map(s => `<div class="stat"><div class="k">${s.k}</div>` +
+    `<div class="v ${s.big ? "big" : ""} ${s.cls || ""}">${s.v}</div></div>`).join("");
+
+  // ---- chart state ----
+  const canvas = document.getElementById("chart"), ctx = canvas.getContext("2d"), tip = document.getElementById("tip");
+  let dpr = 1, W = 0, H = 0, hoverIdx = -1;
+  let chartType = "candles", showSMA = true;
+  const MIN_BARS = 12;
+  let view = { i0: 0, n: bars.length };
+  let drag = null;
+  const PAD = { l: 62, r: 64, t: 18, b: 22 }, VOL_FRAC = 0.20, GAP = 16;
+  const mono = () => getComputedStyle(document.documentElement).getPropertyValue("--mono");
+
+  function clampView() {
+    view.n = Math.max(MIN_BARS, Math.min(bars.length, Math.round(view.n)));
+    view.i0 = Math.max(0, Math.min(bars.length - view.n, Math.round(view.i0)));
+  }
+  function palette() {
+    const cs = getComputedStyle(document.documentElement), g = n => cs.getPropertyValue(n).trim();
+    return { up: g("--up"), down: g("--down"), accent: g("--accent"), grid: g("--grid"),
+             ink: g("--ink"), muted: g("--muted"), faint: g("--faint"), panel: g("--panel") };
+  }
+  function layout() {
+    const priceH = (H - PAD.t - PAD.b) * (1 - VOL_FRAC) - GAP;
+    return { priceH, volTop: PAD.t + priceH + GAP, volH: (H - PAD.t - PAD.b) * VOL_FRAC, chartW: W - PAD.l - PAD.r };
+  }
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const r = canvas.getBoundingClientRect(); W = r.width; H = r.height;
+    canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); draw();
+  }
+
+  function draw() {
+    clampView();
+    const p = palette(), { priceH, volTop, volH, chartW } = layout();
+    const i0 = view.i0, n = view.n, i1 = i0 + n, vis = bars.slice(i0, i1);
+    let pLo = Infinity, pHi = -Infinity, maxVol = 0;
+    for (const b of vis) { if (b.l < pLo) pLo = b.l; if (b.h > pHi) pHi = b.h; if (b.v > maxVol) maxVol = b.v; }
+    const pad = (pHi - pLo) * 0.06 || 1, pMin = pLo - pad, pMax = pHi + pad;
+    const step = chartW / n, bodyW = Math.max(1, step * 0.62);
+    const xOf = k => PAD.l + (k + 0.5) * step;
+    const yOf = price => PAD.t + (pMax - price) / (pMax - pMin) * priceH;
+    const yVol = v => volTop + volH - (v / maxVol) * volH;
+
+    ctx.clearRect(0, 0, W, H);
+    ctx.font = "11px " + mono(); ctx.textBaseline = "middle";
+    ctx.strokeStyle = p.grid; ctx.fillStyle = p.faint; ctx.lineWidth = 1; ctx.textAlign = "right";
+    for (let i = 0; i <= 5; i++) {
+      const price = pMin + (pMax - pMin) * (i / 5), y = yOf(price);
+      ctx.beginPath(); ctx.moveTo(PAD.l, y); ctx.lineTo(W - PAD.r, y); ctx.stroke();
+      ctx.fillText(price.toLocaleString("en-US", { maximumFractionDigits: 0 }), PAD.l - 8, y);
+    }
+    ctx.textAlign = "center"; ctx.fillStyle = p.faint;
+    const multiDay = (vis[n - 1].t - vis[0].t) > 86400000, every = Math.max(1, Math.round(n / 9));
+    for (let k = 0; k < n; k += every) ctx.fillText(multiDay ? fmtDate(vis[k].t) : fmtTime(vis[k].t), xOf(k), H - PAD.b + 12);
+
+    for (let k = 0; k < n; k++) {
+      const b = vis[k]; ctx.fillStyle = b.c >= b.o ? p.up : p.down; ctx.globalAlpha = 0.38;
+      const y = yVol(b.v); ctx.fillRect(xOf(k) - bodyW / 2, y, bodyW, volTop + volH - y);
+    }
+    ctx.globalAlpha = 1;
+
+    if (chartType === "line") {
+      const grad = ctx.createLinearGradient(0, PAD.t, 0, PAD.t + priceH);
+      grad.addColorStop(0, hexA(p.accent, 0.20)); grad.addColorStop(1, hexA(p.accent, 0));
+      ctx.beginPath();
+      vis.forEach((b, k) => { const x = xOf(k), y = yOf(b.c); k ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+      ctx.lineTo(xOf(n - 1), PAD.t + priceH); ctx.lineTo(xOf(0), PAD.t + priceH); ctx.closePath();
+      ctx.fillStyle = grad; ctx.fill();
+      ctx.beginPath();
+      vis.forEach((b, k) => { const x = xOf(k), y = yOf(b.c); k ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+      ctx.strokeStyle = p.ink; ctx.lineWidth = 1.6; ctx.stroke();
+    } else {
+      for (let k = 0; k < n; k++) {
+        const b = vis[k], g = i0 + k;
+        let col, filled;
+        if (chartType === "hollow") {
+          const prevClose = g > 0 ? bars[g - 1].c : b.o;
+          col = b.c >= prevClose ? p.up : p.down; filled = b.c < b.o;   // hollow up, filled down
+        } else { col = b.c >= b.o ? p.up : p.down; filled = true; }
+        const x = xOf(k);
+        ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(x, yOf(b.h)); ctx.lineTo(x, yOf(b.l)); ctx.stroke();
+        const yO = yOf(b.o), yC = yOf(b.c), top = Math.min(yO, yC), hgt = Math.max(1, Math.abs(yC - yO));
+        if (filled) {
+          ctx.fillRect(x - bodyW / 2, top, bodyW, hgt);
+        } else {
+          ctx.fillStyle = p.panel; ctx.fillRect(x - bodyW / 2, top, bodyW, hgt);   // mask wick behind body
+          ctx.strokeRect(x - bodyW / 2 + 0.5, top + 0.5, bodyW - 1, Math.max(1, hgt - 1));
+        }
+      }
+    }
+
+    if (showSMA) {
+      ctx.strokeStyle = p.accent; ctx.lineWidth = 1.6; ctx.beginPath();
+      let started = false;
+      for (let k = 0; k < n; k++) {
+        const g = i0 + k; if (sma[g] == null) continue;
+        const x = xOf(k), y = yOf(sma[g]); started ? ctx.lineTo(x, y) : (ctx.moveTo(x, y), started = true);
+      }
+      ctx.stroke();
+    }
+
+    MARKERS.forEach(m => {
+      const g = nearestIdx(m.t); if (g < i0 || g >= i1) return;
+      const x = xOf(g - i0), col = m.side === "sell" ? p.down : m.side === "buy" ? p.up : p.accent;
+      ctx.strokeStyle = col; ctx.globalAlpha = 0.55; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+      ctx.beginPath(); ctx.moveTo(x, PAD.t); ctx.lineTo(x, volTop + volH); ctx.stroke();
+      ctx.setLineDash([]); ctx.globalAlpha = 1; ctx.fillStyle = col;
+      ctx.beginPath(); ctx.moveTo(x - 5, PAD.t - 12); ctx.lineTo(x + 5, PAD.t - 12); ctx.lineTo(x, PAD.t - 3); ctx.closePath(); ctx.fill();
+    });
+
+    const lastVis = vis[n - 1], yLast = yOf(lastVis.c);
+    ctx.setLineDash([4, 4]); ctx.strokeStyle = p.accent; ctx.globalAlpha = 0.7; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(PAD.l, yLast); ctx.lineTo(W - PAD.r, yLast); ctx.stroke();
+    ctx.setLineDash([]); ctx.globalAlpha = 1;
+    // last-price chip lives in the right gutter (past the plot edge) so it never covers candles
+    const lab = fmt(lastVis.c); ctx.font = "600 11px " + mono();
+    const tw = Math.min(ctx.measureText(lab).width + 10, PAD.r - 3);
+    const cx = W - PAD.r + (PAD.r - tw) / 2;
+    ctx.fillStyle = p.accent; ctx.fillRect(cx, yLast - 9, tw, 18);
+    ctx.fillStyle = "#fff"; ctx.textAlign = "center"; ctx.fillText(lab, cx + tw / 2, yLast);
+
+    if (hoverIdx >= i0 && hoverIdx < i1) {
+      const x = xOf(hoverIdx - i0);
+      ctx.strokeStyle = p.muted; ctx.globalAlpha = 0.5; ctx.lineWidth = 1; ctx.setLineDash([2, 3]);
+      ctx.beginPath(); ctx.moveTo(x, PAD.t); ctx.lineTo(x, volTop + volH); ctx.stroke();
+      ctx.setLineDash([]); ctx.globalAlpha = 1;
+    }
+  }
+
+  // ---- interaction ----
+  function localAt(clientX) {
+    const r = canvas.getBoundingClientRect(), { chartW } = layout(), step = chartW / view.n;
+    return { r, step, local: (clientX - r.left - PAD.l) / step };
+  }
+  function onMove(ev) {
+    if (drag) {
+      const { step } = localAt(ev.clientX);
+      if (Math.abs(ev.clientX - drag.startX) > 3) drag.moved = true;
+      view.i0 = drag.startI0 - (ev.clientX - drag.startX) / step;
+      hoverIdx = -1; tip.style.opacity = "0"; requestAnimationFrame(draw); return;
+    }
+    const { r, step, local } = localAt(ev.clientX);
+    let k = Math.max(0, Math.min(view.n - 1, Math.round(local - 0.5)));
+    const g = view.i0 + k;
+    if (g !== hoverIdx) { hoverIdx = g; requestAnimationFrame(draw); }
+    const b = bars[g], cls = b.c >= b.o ? "up" : "down";
+    let html = `<div class="t">${fmtDate(b.t)} ${fmtTime(b.t)} UTC</div>` +
+      `<div class="row"><span>O</span><span>${fmt(b.o)}</span></div>` +
+      `<div class="row"><span>H</span><span>${fmt(b.h)}</span></div>` +
+      `<div class="row"><span>L</span><span>${fmt(b.l)}</span></div>` +
+      `<div class="row"><span>C</span><span class="${cls}">${fmt(b.c)}</span></div>` +
+      `<div class="row"><span>Vol</span><span>${fmt(b.v, 3)}</span></div>`;
+    if (markerByBar[g]) html += markerByBar[g].map(m => `<div class="mk">${m.label || m.side || "marker"}</div>`).join("");
+    tip.innerHTML = html; tip.style.opacity = "1";
+    const x = PAD.l + (k + 0.5) * step;
+    tip.style.left = Math.max(6, x + 14 > r.width - 170 ? x - 164 : x + 14) + "px";
+    tip.style.top = "22px";
+  }
+  function onLeave() { if (!drag) { hoverIdx = -1; tip.style.opacity = "0"; requestAnimationFrame(draw); } }
+
+  canvas.addEventListener("mousemove", onMove);
+  canvas.addEventListener("mouseleave", onLeave);
+  canvas.addEventListener("mousedown", ev => { drag = { startX: ev.clientX, startI0: view.i0, moved: false }; canvas.style.cursor = "grabbing"; });
+  window.addEventListener("mouseup", () => { if (drag) { drag = null; canvas.style.cursor = "crosshair"; } });
+  canvas.addEventListener("wheel", ev => {
+    ev.preventDefault();
+    const { local } = localAt(ev.clientX), anchor = view.i0 + local;
+    view.n *= ev.deltaY < 0 ? 0.85 : 1 / 0.85; clampView();
+    const step2 = layout().chartW / view.n, r = canvas.getBoundingClientRect();
+    view.i0 = anchor - (ev.clientX - r.left - PAD.l) / step2; clampView();
+    requestAnimationFrame(draw);
+  }, { passive: false });
+  window.addEventListener("resize", resize);
+
+  function zoomBy(f) { const anchor = view.i0 + view.n / 2; view.n *= f; clampView(); view.i0 = anchor - view.n / 2; clampView(); draw(); }
+  document.getElementById("zoomIn").addEventListener("click", () => zoomBy(0.7));
+  document.getElementById("zoomOut").addEventListener("click", () => zoomBy(1 / 0.7));
+  document.getElementById("zoomReset").addEventListener("click", () => { view = { i0: 0, n: bars.length }; draw(); });
+
+  document.querySelectorAll("#typeSeg button").forEach(btn => btn.addEventListener("click", () => {
+    chartType = btn.dataset.type;
+    document.querySelectorAll("#typeSeg button").forEach(x => x.classList.toggle("on", x === btn));
+    draw();
+  }));
+  const smaBtn = document.getElementById("smaBtn");
+  smaBtn.addEventListener("click", () => {
+    showSMA = !showSMA; smaBtn.classList.toggle("on", showSMA); smaBtn.setAttribute("aria-pressed", showSMA); draw();
+  });
+
+  const themeBtn = document.getElementById("themeBtn");
+  const currentTheme = () => document.documentElement.dataset.theme ||
+    (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  function paintThemeBtn() {
+    const t = currentTheme();
+    document.getElementById("themeIcon").textContent = t === "dark" ? "☀" : "☾";
+    document.getElementById("themeLabel").textContent = t === "dark" ? "Light" : "Dark";
+  }
+  themeBtn.addEventListener("click", () => {
+    document.documentElement.dataset.theme = currentTheme() === "dark" ? "light" : "dark";
+    paintThemeBtn(); draw();
+  });
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { paintThemeBtn(); draw(); });
+  paintThemeBtn(); resize();
+</script>
+</body>
+</html>
