@@ -119,3 +119,18 @@ def test_parse_live_ticks():
     assert cols["sym"] == ["BTCUSDT"]
     assert cols["venue"] == ["binance"]
     assert cols["buyerMaker"] == [True]
+
+
+def test_parse_live_quotes():
+    quotes = [{"venue": "binance", "symbol": "BTCUSDT", "update_id": 42,
+               "bid": "63999.10", "bid_qty": "1.5", "ask": "64000.20", "ask_qty": "2.0",
+               "recv_ts": 1786492800239}]
+    cols = binance.parse_live_quotes(quotes)
+    assert cols["updateID"] == [42]
+    assert cols["time"] == [1786492800239]
+    assert cols["bid"] == [63999.10]
+    assert cols["bidSize"] == [1.5]
+    assert cols["ask"] == [64000.20]
+    assert cols["askSize"] == [2.0]
+    assert cols["sym"] == ["BTCUSDT"]
+    assert cols["venue"] == ["binance"]

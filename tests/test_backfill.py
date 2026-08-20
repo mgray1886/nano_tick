@@ -94,6 +94,7 @@ class FakeWriter:
     def __init__(self, floor=None):
         self.writes = []
         self.inserted = []
+        self.quote_inserted = []
         self.savedowns = []
         self._floor = floor
 
@@ -105,6 +106,10 @@ class FakeWriter:
     def insert(self, cols):
         self.inserted.extend(cols["tradeID"])
         return len(cols["tradeID"])
+
+    def insert_quote(self, cols):
+        self.quote_inserted.extend(cols["updateID"])
+        return len(cols["updateID"])
 
     def savedown(self, day):
         self.savedowns.append(day)
@@ -207,6 +212,11 @@ def _chunk(ms, tid):
             "price": [1.0], "qty": [1.0], "eventTime": [ms], "buyerMaker": [False]}
 
 
+def _qchunk(ms, uid):
+    return {"time": [ms], "sym": ["BTCUSDT"], "venue": ["binance"], "updateID": [uid],
+            "bid": [1.0], "bidSize": [2.0], "ask": [1.1], "askSize": [3.0]}
+
+
 def test_roller_first_feed_does_not_roll():
     w = FakeWriter()
     res = backfill.RdbRoller(w).feed(_chunk(_ms(2026, 7, 15), 1))
@@ -241,6 +251,19 @@ def test_roller_flush_savedowns_current_day():
     assert r.flush() == date(2026, 7, 15)
     assert w.savedowns == [date(2026, 7, 15)]
     assert r.flush() is None                         # nothing left to persist
+
+
+def test_roller_trades_and_quotes_share_one_day_boundary():
+    w = FakeWriter()
+    r = backfill.RdbRoller(w)
+    r.feed(_chunk(_ms(2026, 7, 15), 1))              # trade, day 15
+    r.feed_quote(_qchunk(_ms(2026, 7, 15, 23), 10))  # quote, day 15 -> no roll
+    assert w.savedowns == []
+    res = r.feed_quote(_qchunk(_ms(2026, 7, 16, 0), 11))  # quote crosses midnight
+    assert res["rolled"] == date(2026, 7, 15)        # rolls BOTH tables
+    assert w.savedowns == [date(2026, 7, 15)]
+    assert w.inserted == [1]
+    assert w.quote_inserted == [10, 11]
 
 
 # --- retention prune -------------------------------------------------------
