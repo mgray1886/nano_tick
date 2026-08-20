@@ -50,6 +50,37 @@ jobs:
       - name: Unit tests
         run: pytest
 
+  q-tests:
+    # kdb+/q analytics tests (schema.q + analytics.q, run via pykx). Needs a
+    # KDB-X license in the KDB_LICENSE_B64 secret; skips with a warning when it
+    # is absent, so forks/PRs without the secret aren't blocked.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for kdb license
+        id: lic
+        env:
+          KDB_LICENSE_B64: ${{ secrets.KDB_LICENSE_B64 }}
+        run: |
+          if [ -n "$KDB_LICENSE_B64" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::KDB_LICENSE_B64 secret not set; skipping q tests"
+          fi
+      - uses: actions/setup-python@v5
+        if: steps.lic.outputs.present == 'true'
+        with:
+          python-version: "3.11"   # pykx 4.0.0 wheels
+      - name: Install pykx
+        if: steps.lic.outputs.present == 'true'
+        run: pip install pykx==4.0.0
+      - name: Run q tests
+        if: steps.lic.outputs.present == 'true'
+        env:
+          KDB_LICENSE_B64: ${{ secrets.KDB_LICENSE_B64 }}
+        run: python platform/run_q_tests.py
+
   docker-build:
     # Catches Dockerfile/compose drift (e.g. a renamed folder no longer copied)
     # without needing network access to Binance.
