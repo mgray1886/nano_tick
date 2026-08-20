@@ -249,6 +249,8 @@ deployed on the physical Pis — see [platform/RESEARCH.md](platform/RESEARCH.md
 - [ ] **Deploy live on the Pis** — collect real quote data (bookTicker is
       live-only), then run the evaluation on real market data. The real milestone;
       everything above is proven only on synthetic / archived-trade data.
+      Runbook + verification checklist: [platform/DEPLOY.md](platform/DEPLOY.md)
+      (end-to-end dry-run validated).
 - [ ] Harden the REST bridge (API key + weight-aware rate limiting) for large
       cold-start backfills
 - [ ] Incremental bar-table precompute (materialise bars to speed repeated queries)
