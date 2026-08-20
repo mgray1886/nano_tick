@@ -315,11 +315,20 @@ def run(config: BackfillConfig, writer: Optional[HdbWriter] = None) -> dict:
 # --- current-day gap bridge (REST) -----------------------------------------
 
 def bridge(config: BackfillConfig, writer: HdbWriter, target_id: Optional[int] = None,
-           page: int = binance_client.TRADES_LIMIT) -> dict:
+           page: int = binance_client.TRADES_LIMIT,
+           pacer: Optional[binance_client.WeightPacer] = None) -> dict:
     """Fill trades from the last stored id up to `target_id` (exclusive — the
     live stream's first id) by paging REST. With target_id=None, fills up to
     the current tip. Dedup is downstream by tradeID; here we just page forward.
+
+    Gap-free by construction: pages advance contiguously by trade id
+    (`start = last id + 1`), and rate-limit backoff inside the client retries the
+    SAME request rather than skipping it, so no id in [floor+1, target_id) is
+    ever missed. `pacer` (a shared WeightPacer) keeps the whole run under the
+    Binance request-weight cap; one is created if not supplied.
     """
+    if pacer is None:
+        pacer = binance_client.WeightPacer()
     floor = writer.max_stored_id()
     if floor is None:
         logger.warning("no stored trade_id to bridge from; skipping REST bridge")
@@ -327,7 +336,7 @@ def bridge(config: BackfillConfig, writer: HdbWriter, target_id: Optional[int] =
     start = floor + 1
     inserted = 0
     while target_id is None or start < target_id:
-        trades = binance_client.fetch_trades(config.symbol, start, page, config.api_key)
+        trades = binance_client.fetch_trades(config.symbol, start, page, config.api_key, pacer=pacer)
         if not trades:
             break
         if target_id is not None:
