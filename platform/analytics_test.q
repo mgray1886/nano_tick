@@ -103,6 +103,24 @@ assert("trades = sum";           c0[`trades]=2);
 assert("vwap vol-weighted";      1e-8>abs c0[`vwap]-((100.5*1)+(101.5*2))%3);
 assert("imbalance (b-s)%vol";    1e-8>abs c0[`imbalance]+1%3);
 
+/ --- 8. rebucketQuoteBars: coarsen stored quote bars -----------------
+/ 4 one-minute quote bars -> 2 two-minute; each field is the LAST in the bucket,
+/ then mid/spread/micro/qimb are recomputed.
+-1"[8] rebucketQuoteBars (coarsen stored quote bars)";
+qbb:([] time:2026.08.12D00:00 2026.08.12D00:01 2026.08.12D00:02 2026.08.12D00:03;
+        sym:4#`BTCUSDT;
+        bid:100 101 102 103f; ask:100.1 101.1 102.1 103.1;
+        bidSize:1 2 3 4f; askSize:4 3 2 1f);
+qrb:0!rebucketQuoteBars[qbb; 0D00:02];
+assert("2 coarse quote bars"; 2=count qrb);
+qc0:qrb 0;
+assert("bid = last in bucket (101)";  qc0[`bid]=101f);
+assert("ask = last (101.1)";          qc0[`ask]=101.1);
+assert("bidSize = last (2)";          qc0[`bidSize]=2f);
+assert("askSize = last (3)";          qc0[`askSize]=3f);
+assert("mid recomputed (101.05)";     1e-8>abs qc0[`mid]-101.05);
+assert("qimb recomputed ((2-3)%5)";   1e-8>abs qc0[`qimb]+1%5);
+
 -1"";
 if[fails>0; -2 (string fails)," CHECK(S) FAILED"; exit 1];
 -1"ALL ANALYTICS CHECKS PASSED.";

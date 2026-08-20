@@ -64,6 +64,19 @@ bar:([]
   sellVol  :`float$();
   imbalance:`float$());
 
+/ Precomputed quote bars: the LAST bid/ask/size in each BAR_SIZE bucket (the
+/ point-in-time book at bar close), materialised like `bar` so featureTable's
+/ quote side reads ~1440 rows instead of scanning every quote. Only the raw
+/ last-in-bar values are stored; mid/spread/micro/qimb are derived on read
+/ (analytics.q rebucketQuoteBars) — rebucketing is EXACT here (last of last = last).
+quoteBar:([]
+  time    :`timestamp$();
+  sym     :`symbol$();
+  bid     :`float$();
+  ask     :`float$();
+  bidSize :`float$();
+  askSize :`float$());
+
 / --- helpers ---------------------------------------------------------
 / epoch-millis (long) -> kdb timestamp. kdb epoch is 2000.01.01, so add the
 / nanos onto the 1970 literal directly.
@@ -107,6 +120,14 @@ buildBars:{[t;sz]
       by sym, time:sz xbar time from t;
   `time`sym`open`high`low`close`vwap`vol`trades`buyVol`sellVol`imbalance xcols 0!b };
 
+/ Aggregate quotes into per-bar LAST bid/ask/size (the book at bar close), grouped
+/ by sym — the raw values analytics.q's quoteBarsOf takes `last` of; derived
+/ features (mid/spread/micro/qimb) are recomputed on read.
+buildQuoteBars:{[q;sz]
+  b:select bid:last bid, ask:last ask, bidSize:last bidSize, askSize:last askSize
+      by sym, time:sz xbar time from q;
+  `time`sym`bid`ask`bidSize`askSize xcols 0!b };
+
 / Persist precomputed bars for day `dt` (built from `trade` BEFORE saveTable
 / cleared it). No-op when the day had no trades.
 saveBars:{[dt;b]
@@ -117,14 +138,26 @@ saveBars:{[dt;b]
   -1"saved bar partition ",string[dt]," to ",1_string HDB;
   0 };
 
+/ Persist precomputed quote bars for day `dt` (built from `quote` before it was
+/ cleared). No-op when the day had no quotes.
+saveQuoteBars:{[dt;b]
+  if[0=count b; :0];
+  quoteBar::b;
+  .Q.dpft[HDB; dt; `sym; `quoteBar];
+  delete from `quoteBar;
+  -1"saved quoteBar partition ",string[dt]," to ",1_string HDB;
+  0 };
+
 / Persist trade + quote for the COMPLETED day AND its materialised bars, then
 / clear the RDB. Bars are built from `trade` first, before saveTable clears it.
 / Call at date rollover.
 savedown:{[dt]
   b:buildBars[trade; BAR_SIZE];
+  qb:buildQuoteBars[quote; BAR_SIZE];
   saveTable[dt;`trade];
   saveTable[dt;`quote];
   saveBars[dt; b];
+  saveQuoteBars[dt; qb];
   0 };
 
 / Convenience: persist whatever is buffered under today's date (manual flush).

@@ -56,6 +56,19 @@ assert("trade has 2 rows";          2=count trade);
 assert("time became timestamp";     (exec first time from trade)=ms2ts nowMs);
 assert("conversion preserves order";(exec last time from trade)=ms2ts nowMs+100);
 
+/ Also load two quotes in the same minute so savedown materialises quoteBar; the
+/ bar takes the LAST quote (bid 100.0 / ask 100.2, sizes 2 / 3).
+qbatch:([]
+  time    :nowMs+0 100;
+  sym     :`BTCUSDT`BTCUSDT;
+  venue   :`binance`binance;
+  updateID:5000 5001;
+  bid     :99.9 100.0;
+  bidSize :1 2f;
+  ask     :100.1 100.2;
+  askSize :2 3f);
+insertRawQuote qbatch;
+
 / --- 3. savedown: .Q.dpft writes a partition, RDB clears -------------
 -1"[3] savedown -> HDB partition";
 d:2023.11.14;
@@ -79,6 +92,18 @@ assert("bar low = 42000";           42000f = first get hsym `$TESTHDB,"/2023.11.
 assert("bar close = 42001";         42001f = first get hsym `$TESTHDB,"/2023.11.14/bar/close");
 assert("bar vol = 0.75";            1e-8>abs 0.75 - first get hsym `$TESTHDB,"/2023.11.14/bar/vol");
 assert("bar trades = 2";            2 = first get hsym `$TESTHDB,"/2023.11.14/bar/trades");
+
+/ --- 5. savedown also materialises the quoteBar table ----------------
+/ Two quotes in one minute; the bar takes the LAST: bid 100.0 / ask 100.2.
+-1"[5] savedown -> quoteBar partition";
+partQ:hsym `$TESTHDB,"/2023.11.14/quoteBar";
+assert("quoteBar partition dir exists"; not ()~key partQ);
+assert("quoteBar has bid column";       `bid in key partQ);
+assert("one quote bar (same minute)";   1 = count get hsym `$TESTHDB,"/2023.11.14/quoteBar/bid");
+assert("quoteBar bid = 100.0 (last)";   100.0 = first get hsym `$TESTHDB,"/2023.11.14/quoteBar/bid");
+assert("quoteBar ask = 100.2 (last)";   100.2 = first get hsym `$TESTHDB,"/2023.11.14/quoteBar/ask");
+assert("quoteBar bidSize = 2 (last)";   2f = first get hsym `$TESTHDB,"/2023.11.14/quoteBar/bidSize");
+assert("quoteBar askSize = 3 (last)";   3f = first get hsym `$TESTHDB,"/2023.11.14/quoteBar/askSize");
 
 / --- result ----------------------------------------------------------
 -1"";
