@@ -44,6 +44,26 @@ quote:([]
   ask     :`float$();
   askSize :`float$());
 
+/ Precomputed OHLCV + order-flow bars, materialised per COMPLETED day at savedown
+/ (option c): the reader then reads ~1440 rows/day instead of scanning millions of
+/ trades. TODAY stays fast too — it is aggregated on the fly from the in-memory
+/ `trade` RDB. One base granularity (BAR_SIZE = 1 min); coarser bars are
+/ re-bucketed on read (analytics.q rebucketBars). Columns match analytics.q barsOf.
+BAR_SIZE:0D00:01;
+bar:([]
+  time     :`timestamp$();  / bar-open time (BAR_SIZE bucket)
+  sym      :`symbol$();
+  open     :`float$();
+  high     :`float$();
+  low      :`float$();
+  close    :`float$();
+  vwap     :`float$();
+  vol      :`float$();
+  trades   :`long$();
+  buyVol   :`float$();
+  sellVol  :`float$();
+  imbalance:`float$());
+
 / --- helpers ---------------------------------------------------------
 / epoch-millis (long) -> kdb timestamp. kdb epoch is 2000.01.01, so add the
 / nanos onto the 1970 literal directly.
@@ -76,9 +96,36 @@ saveTable:{[dt;t]
   -1"saved ",string[t]," partition ",string[dt]," to ",1_string HDB;
   0 };
 
-/ Persist all tables (trade + quote) for the COMPLETED day, then clear the RDB.
+/ Aggregate a trade-shaped table into OHLCV+flow bars of width `sz`, grouped by
+/ sym (columns match analytics.q barsOf). Unkeyed, `time`sym leading so .Q.dpft
+/ can partition it.
+buildBars:{[t;sz]
+  b:select open:first price, high:max price, low:min price, close:last price,
+           vwap:qty wavg price, vol:sum qty, trades:count i,
+           buyVol:sum qty*not buyerMaker, sellVol:sum qty*buyerMaker,
+           imbalance:%[sum qty*(1 - 2*buyerMaker); sum qty]
+      by sym, time:sz xbar time from t;
+  `time`sym`open`high`low`close`vwap`vol`trades`buyVol`sellVol`imbalance xcols 0!b };
+
+/ Persist precomputed bars for day `dt` (built from `trade` BEFORE saveTable
+/ cleared it). No-op when the day had no trades.
+saveBars:{[dt;b]
+  if[0=count b; :0];
+  bar::b;                      / .Q.dpft partitions the global `bar` (sorts by sym, p#)
+  .Q.dpft[HDB; dt; `sym; `bar];
+  delete from `bar;
+  -1"saved bar partition ",string[dt]," to ",1_string HDB;
+  0 };
+
+/ Persist trade + quote for the COMPLETED day AND its materialised bars, then
+/ clear the RDB. Bars are built from `trade` first, before saveTable clears it.
 / Call at date rollover.
-savedown:{[dt] saveTable[dt;`trade]; saveTable[dt;`quote]; 0};
+savedown:{[dt]
+  b:buildBars[trade; BAR_SIZE];
+  saveTable[dt;`trade];
+  saveTable[dt;`quote];
+  saveBars[dt; b];
+  0 };
 
 / Convenience: persist whatever is buffered under today's date (manual flush).
 flush:{savedown[.z.d]};

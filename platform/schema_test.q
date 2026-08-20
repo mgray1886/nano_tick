@@ -66,6 +66,20 @@ assert("partition dir exists";       not ()~key part);
 assert("partition has price column"; `price in key part);
 assert("sym enum file written";      not ()~key hsym `$TESTHDB,"/sym");
 
+/ --- 4. savedown also materialises the bar table ---------------------
+/ Both trades are 100ms apart, so they fall in one 1-min bar: OHLC 42000/42001.
+-1"[4] savedown -> bar partition";
+partB:hsym `$TESTHDB,"/2023.11.14/bar";
+assert("bar partition dir exists";  not ()~key partB);
+assert("bar has close column";      `close in key partB);
+assert("one bar (same minute)";     1 = count get hsym `$TESTHDB,"/2023.11.14/bar/close");
+assert("bar open = 42000";          42000f = first get hsym `$TESTHDB,"/2023.11.14/bar/open");
+assert("bar high = 42001";          42001f = first get hsym `$TESTHDB,"/2023.11.14/bar/high");
+assert("bar low = 42000";           42000f = first get hsym `$TESTHDB,"/2023.11.14/bar/low");
+assert("bar close = 42001";         42001f = first get hsym `$TESTHDB,"/2023.11.14/bar/close");
+assert("bar vol = 0.75";            1e-8>abs 0.75 - first get hsym `$TESTHDB,"/2023.11.14/bar/vol");
+assert("bar trades = 2";            2 = first get hsym `$TESTHDB,"/2023.11.14/bar/trades");
+
 / --- result ----------------------------------------------------------
 -1"";
 if[fails>0; -2 (string fails)," CHECK(S) FAILED"; exit 1];
