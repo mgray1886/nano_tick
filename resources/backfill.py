@@ -295,6 +295,9 @@ def run(config: BackfillConfig, writer: Optional[HdbWriter] = None) -> dict:
     summary.
     """
     dates = plan_dates(datetime.now(timezone.utc).date(), config.days)
+    if not dates:
+        logger.info("backfill %s: nothing to fill (days=%d)", config.symbol, config.days)
+        return {"written": 0, "rows": 0, "skipped": 0, "missing": 0, "failed": 0}
     existing = existing_partition_dates(config.hdb_path)
     logger.info(
         "backfill %s: %d days [%s .. %s], %d already in HDB",
