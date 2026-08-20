@@ -75,10 +75,20 @@ jobs:
       - name: Install pykx
         if: steps.lic.outputs.present == 'true'
         run: pip install pykx==4.0.0
-      - name: Run q tests
+      - name: Install kdb license
+        # pykx doesn't auto-install KDB_LICENSE_B64 on import; decode it to a
+        # known location (~/.kx/kc.lic) and point QLIC at it, matching a normal
+        # KDB-X install.
         if: steps.lic.outputs.present == 'true'
         env:
           KDB_LICENSE_B64: ${{ secrets.KDB_LICENSE_B64 }}
+        run: |
+          mkdir -p "$HOME/.kx"
+          printf '%s' "$KDB_LICENSE_B64" | base64 -d > "$HOME/.kx/kc.lic"
+          echo "QLIC=$HOME/.kx" >> "$GITHUB_ENV"
+          echo "wrote $(wc -c < "$HOME/.kx/kc.lic")-byte license to ~/.kx/kc.lic"
+      - name: Run q tests
+        if: steps.lic.outputs.present == 'true'
         run: python platform/run_q_tests.py
 
   docker-build:
