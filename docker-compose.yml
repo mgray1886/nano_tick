@@ -1,6 +1,24 @@
 # Local end-to-end test stack mirroring the two-Pi topology:
 #   ingest (= Pi 3A+) --> broker (= mosquitto on Pi 4B) --> receiver (= 4B consumer)
 # Usage: docker compose up --build   (ingest pulls real Binance data)
+#
+# Memory limits mirror the per-service `MemoryMax` in the real systemd units,
+# NOT an invented share of each box's RAM. The real Pis have NO per-process
+# floors — RAM is free-for-all and the kernel OOM-killer arbitrates when a box
+# fills up. Each service instead sets a hard `MemoryMax` ceiling on purpose, so
+# systemd kills+restarts a runaway rather than the kernel picking a random
+# victim (e.g. sshd). We reproduce those exact ceilings here:
+#
+#   ingest   -> ingest.service   MemoryMax=256M  (3A+, its whole box)
+#   recorder -> recorder.service MemoryMax=384M  (4B)
+#   broker   -> stock mosquitto unit has NO cap -> bounded only by the 2GB box
+#   receiver -> debug/reference tool, not a deployed 4B service (modest cap only)
+#
+# CPU caps are approximate — a dev core is far faster per-cycle than a Pi's
+# Cortex-A5x, so `cpus` throttles CPU *time* but not the speed of a Pi core.
+# `restart` mirrors each unit's Restart=always so a memory-kill self-heals.
+# Note: Docker has no clean equivalent of the units' soft MemoryHigh throttle;
+# only the hard MemoryMax ceiling is reproduced.
 services:
   broker:
     image: eclipse-mosquitto:2
@@ -9,6 +27,12 @@ services:
       - mosquitto-data:/mosquitto/data
     ports:
       - "1883:1883" # lets host-side tools (e.g. mosquitto_sub, MQTT Explorer) peek at the feed
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          # No memory cap: stock mosquitto has no MemoryMax, so on the real 4B
+          # it is bounded only by the 2GB box (shared with recorder + OS).
 
   ingest:
     build: .
@@ -21,16 +45,26 @@ services:
     depends_on:
       - broker
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M # == ingest.service MemoryMax on the 3A+
 
   receiver:
     build: .
     command: python tools/receiver.py --host broker
     depends_on:
       - broker
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M # debug tool, not a deployed 4B service; modest cap to bound the container
 
   recorder:
     build: .
-    command: python platform/recorder.py
+    command: python resources/recorder.py
     environment:
       MQTT_HOST: broker
       DATA_DIR: /data
@@ -38,6 +72,12 @@ services:
       - ./tmp/recorder:/data # gitignored; inspect recorded NDJSON here
     depends_on:
       - broker
+    restart: unless-stopped # mirrors recorder.service Restart=always
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 384M # == recorder.service MemoryMax on the 4B
 
 volumes:
   mosquitto-data:

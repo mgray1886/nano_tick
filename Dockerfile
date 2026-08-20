@@ -9,3 +9,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY ingest/ ingest/
 COPY tools/ tools/
 COPY platform/ platform/
+COPY clients/ clients/
+COPY resources/ resources/
