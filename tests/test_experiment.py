@@ -93,6 +93,14 @@ def test_parser_requires_start():
         exp.build_parser().parse_args([])
 
 
+def test_parser_alpha_default_and_choice():
+    assert exp.build_parser().parse_args(["--start", "2026-08-18"]).alpha == "logistic"
+    assert exp.build_parser().parse_args(
+        ["--start", "2026-08-18", "--alpha", "imbalance"]).alpha == "imbalance"
+    with pytest.raises(SystemExit):
+        exp.build_parser().parse_args(["--start", "2026-08-18", "--alpha", "nope"])
+
+
 # --- report formatting -----------------------------------------------------
 
 def test_format_report_contains_key_fields():
@@ -112,3 +120,9 @@ def test_format_report_contains_key_fields():
     assert "balanced_accuracy" in text
     assert "fold0" in text and "fold1" in text
     assert "skipped 1" in text
+    assert "alpha=logistic" in text                       # default shown
+
+    text2 = exp.format_report(result, symbol="BTCUSDT", days=days, bar_seconds=60,
+                              horizon=1, window=20, cost=0.002, label_mix={-1: 5, 1: 5},
+                              alpha="imbalance")
+    assert "alpha=imbalance" in text2
