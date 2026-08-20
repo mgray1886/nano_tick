@@ -57,14 +57,25 @@ def existing_partition_dates(hdb_path: Path) -> set[date]:
     return {d for d, _ in _iter_partitions(hdb_path)}
 
 
-def latest_partition_tradeid_path(hdb_path: Path) -> Optional[Path]:
-    """Path to the tradeID column file of the newest partition, or None if the
-    HDB is empty. Binance ids are monotonic, so that column's max is the whole
-    HDB's max — and reading one column file avoids loading the HDB."""
-    parts = existing_partition_dates(hdb_path)
-    if not parts:
+def latest_partition_col(hdb_path: Path, table: str, col: str) -> Optional[Path]:
+    """Path to `col`'s column file in the newest partition holding `table`, or
+    None. Binance ids are monotonic, so that column's max is the whole HDB's
+    max — reading one column file avoids loading the HDB."""
+    dates = []
+    if hdb_path.exists():
+        for entry in hdb_path.iterdir():
+            if entry.is_dir() and (entry / table).exists():
+                try:
+                    dates.append((datetime.strptime(entry.name, "%Y.%m.%d").date(), entry))
+                except ValueError:
+                    continue
+    if not dates:
         return None
-    return hdb_path / max(parts).strftime("%Y.%m.%d") / "trade" / "tradeID"
+    return max(dates)[1] / table / col
+
+
+def latest_partition_tradeid_path(hdb_path: Path) -> Optional[Path]:
+    return latest_partition_col(hdb_path, "trade", "tradeID")
 
 
 # --- write path (pykx bridge; needs a licensed q) --------------------------
@@ -98,27 +109,49 @@ class HdbWriter:
             "buyerMaker": kx.BooleanVector(cols["buyerMaker"]),
         })
 
+    def _quote_table(self, cols: dict):
+        kx = self._kx
+        return kx.Table(data={
+            "time": kx.LongVector(cols["time"]),
+            "sym": kx.SymbolVector(cols["sym"]),
+            "venue": kx.SymbolVector(cols["venue"]),
+            "updateID": kx.LongVector(cols["updateID"]),
+            "bid": kx.FloatVector(cols["bid"]),
+            "bidSize": kx.FloatVector(cols["bidSize"]),
+            "ask": kx.FloatVector(cols["ask"]),
+            "askSize": kx.FloatVector(cols["askSize"]),
+        })
+
     def insert(self, cols: dict) -> int:
         """Insert a chunk into the in-memory RDB `trade` (no savedown)."""
         return int(self._kx.q("insertRaw", self._table(cols)).py())
 
+    def insert_quote(self, cols: dict) -> int:
+        """Insert a chunk into the in-memory RDB `quote` (no savedown)."""
+        return int(self._kx.q("insertRawQuote", self._quote_table(cols)).py())
+
     def savedown(self, day: date) -> None:
-        """Persist the RDB to the HDB as `day`'s partition, then clear it."""
-        self._kx.q("savedown", day)  # .Q.dpft
+        """Persist the RDB (trade + quote) to the HDB partition, then clear."""
+        self._kx.q("savedown", day)  # .Q.dpft on both tables
+
+    def _max_id(self, table: str, col: str) -> Optional[int]:
+        kx = self._kx
+        if int(kx.q(f"count {table}").py()) > 0:      # RDB has today's data
+            return int(kx.q(f"exec max {col} from {table}").py())
+        # RDB empty: read the newest partition's id column directly. No \l, so
+        # it neither clobbers the live table nor hits 'nyi from exec-over-parts.
+        path = latest_partition_col(self._hdb_path, table, col)
+        if path is None:
+            return None
+        return int(kx.q("{max get hsym x}", kx.SymbolAtom(str(path))).py())
 
     def max_stored_id(self) -> Optional[int]:
-        """Highest trade_id in the store: the RDB when it holds today's data,
-        else the newest HDB partition. The gap bridge fetches from here."""
-        kx = self._kx
-        if int(kx.q("count trade").py()) > 0:
-            return int(kx.q("exec max tradeID from trade").py())
-        # RDB empty (fresh start): read the tradeID column of the newest
-        # partition directly. No \l, so it neither clobbers the live `trade`
-        # nor hits 'nyi from exec-over-partitions, and stays in this one q.
-        col = latest_partition_tradeid_path(self._hdb_path)
-        if col is None:
-            return None
-        return int(kx.q("{max get hsym x}", kx.SymbolAtom(str(col))).py())
+        """Highest trade_id in the store — the trade gap bridge fetches from here."""
+        return self._max_id("trade", "tradeID")
+
+    def max_stored_quote_id(self) -> Optional[int]:
+        """Highest quote update_id in the store — for restart-safe quote dedup."""
+        return self._max_id("quote", "updateID")
 
     def write_day(self, day: date, chunks: Iterable[dict]) -> int:
         """Backfill a whole archived day: insert its chunks, then savedown."""
@@ -134,11 +167,13 @@ def _utc_date(ms: int) -> date:
 
 
 class RdbRoller:
-    """Live-path RDB lifecycle: accumulate the current day's ticks in the RDB
-    and savedown the finished day when the feed crosses UTC midnight.
+    """Live-path RDB lifecycle for BOTH tables: accumulate the current day's
+    trades and quotes in the RDB and savedown the finished day (trade + quote)
+    when the feed crosses UTC midnight.
 
-    The day comes from the data (the chunk's last trade time), so the roll
-    fires when the first tick of the new day arrives — no timer needed. A chunk
+    The day comes from the data (a chunk's last time), so the roll fires when
+    the first record of the new day arrives — no timer needed. Trades and quotes
+    share one day boundary (whichever crosses first rolls both). A chunk
     straddling the boundary is negligible for a liquid symbol; an illiquid one
     could add a midnight timer that calls flush().
     """
@@ -147,17 +182,27 @@ class RdbRoller:
         self._writer = writer
         self._current_day: Optional[date] = None
 
+    def _roll(self, day: date) -> Optional[date]:
+        """Savedown + advance if `day` is past the current one. Never moves the
+        day backward (late cross-boundary records stay in the current day)."""
+        if self._current_day is None:
+            self._current_day = day
+            return None
+        if day > self._current_day:
+            self._writer.savedown(self._current_day)  # persist + clear both tables
+            rolled, self._current_day = self._current_day, day
+            return rolled
+        return None
+
     def feed(self, cols: dict) -> dict:
-        """Insert a live chunk, savedown-ing the previous day first if this
-        chunk has crossed into a new UTC day."""
-        day = _utc_date(cols["time"][-1])
-        rolled = None
-        if self._current_day is not None and day > self._current_day:
-            self._writer.savedown(self._current_day)  # persist + clear finished day
-            rolled = self._current_day
-        self._current_day = day
-        inserted = self._writer.insert(cols)
-        return {"inserted": inserted, "day": day, "rolled": rolled}
+        rolled = self._roll(_utc_date(cols["time"][-1]))
+        return {"inserted": self._writer.insert(cols),
+                "day": self._current_day, "rolled": rolled}
+
+    def feed_quote(self, cols: dict) -> dict:
+        rolled = self._roll(_utc_date(cols["time"][-1]))
+        return {"inserted": self._writer.insert_quote(cols),
+                "day": self._current_day, "rolled": rolled}
 
     def flush(self) -> Optional[date]:
         """Savedown the current day (shutdown / manual). Returns it, or None."""
