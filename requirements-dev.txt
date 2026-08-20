@@ -1,3 +1,8 @@
 -r ingest/requirements.txt
 pytest==8.4.1
 flake8==7.3.0
+# Phase 4 analytics/modelling (resources/evaluation.py). Dev/CI only — NOT the
+# Pi runtime (platform/requirements.txt stays paho + pykx).
+numpy==2.5.1
+pandas==3.0.5
+scikit-learn==1.9.0
