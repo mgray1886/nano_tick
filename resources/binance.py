@@ -8,6 +8,9 @@ from typing import Iterator
 # insertRaw converts them to timestamps.
 COLUMNS = ("time", "sym", "venue", "tradeID", "price", "qty", "eventTime", "buyerMaker")
 
+# schema.q's quote columns (time is recv_ts epoch-millis; insertRawQuote converts).
+QUOTE_COLUMNS = ("time", "sym", "venue", "updateID", "bid", "bidSize", "ask", "askSize")
+
 # Binance spot daily `trades` CSV (newer files carry a header row):
 #   id, price, qty, quoteQty, time, isBuyerMaker, isBestMatch
 _ID, _PRICE, _QTY, _TIME, _MAKER = 0, 1, 2, 4, 5
@@ -93,4 +96,20 @@ def parse_live_ticks(ticks: list) -> dict:
         cols["price"].append(float(t["price"]))
         cols["qty"].append(float(t["qty"]))
         cols["buyerMaker"].append(bool(t["is_buyer_maker"]))
+    return cols
+
+
+def parse_live_quotes(quotes: list) -> dict:
+    """Normalised MQTT quotes (from the 3A+ normalize_quote) -> one column
+    chunk in schema.q's quote layout."""
+    cols = {c: [] for c in QUOTE_COLUMNS}
+    for q in quotes:
+        cols["time"].append(_to_millis(int(q["recv_ts"])))
+        cols["sym"].append(q["symbol"])
+        cols["venue"].append(q["venue"])
+        cols["updateID"].append(int(q["update_id"]))
+        cols["bid"].append(float(q["bid"]))
+        cols["bidSize"].append(float(q["bid_qty"]))
+        cols["ask"].append(float(q["ask"]))
+        cols["askSize"].append(float(q["ask_qty"]))
     return cols

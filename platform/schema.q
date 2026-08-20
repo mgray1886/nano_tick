@@ -32,6 +32,18 @@ trade:([]
   eventTime :`timestamp$();  / event_ts — venue emit time
   buyerMaker:`boolean$());   / Binance `m`: true if buyer is the maker
 
+/ Best bid/ask (@bookTicker). Spot bookTicker carries NO exchange timestamp,
+/ so `time` is the 3A+ receive time (recv_ts), not an exchange time.
+quote:([]
+  time    :`timestamp$();  / recv_ts — ingest receive time
+  sym     :`symbol$();
+  venue   :`symbol$();
+  updateID:`long$();       / bookTicker `u`; monotonic per sym (dedup key)
+  bid     :`float$();
+  bidSize :`float$();
+  ask     :`float$();
+  askSize :`float$());
+
 / --- helpers ---------------------------------------------------------
 / epoch-millis (long) -> kdb timestamp. kdb epoch is 2000.01.01, so add the
 / nanos onto the 1970 literal directly.
@@ -44,23 +56,32 @@ insertRaw:{[rows]
   `trade insert update time:ms2ts time, eventTime:ms2ts eventTime from rows;
   count rows };
 
+/ Same, for quotes: only `time` (recv_ts) needs converting.
+insertRawQuote:{[rows]
+  `quote insert update time:ms2ts time from rows;
+  count rows };
+
 / Tickerplant-style hook, so migrating to kdb+tick later needs no bridge change.
 upd:{[t;x] t insert x};
 
 / --- persistence -----------------------------------------------------
-/ Append the in-memory `trade` to the HDB as partition `dt` (a date): splayed,
-/ time-then-sym sorted, with the `p#` attribute on sym (all via .Q.dpft), then
-/ clear the RDB. Call at date rollover for the COMPLETED day.
-savedown:{[dt]
-  if[0=count trade; :0];
-  `time xasc `trade;               / time order; .Q.dpft's sym sort is stable
-  .Q.dpft[HDB; dt; `sym; `trade];  / enumerates syms, sorts by sym, applies p#
-  delete from `trade;
-  -1"saved partition ",string[dt]," to ",1_string HDB;
+/ Append one in-memory table `t` to the HDB as partition `dt` (a date):
+/ splayed, time-then-sym sorted, with the `p#` attribute on sym (all via
+/ .Q.dpft), then clear it. No-op if the table is empty.
+saveTable:{[dt;t]
+  if[0=count value t; :0];
+  `time xasc t;                / time order; .Q.dpft's sym sort is stable
+  .Q.dpft[HDB; dt; `sym; t];   / enumerates syms, sorts by sym, applies p#
+  delete from t;
+  -1"saved ",string[t]," partition ",string[dt]," to ",1_string HDB;
   0 };
+
+/ Persist all tables (trade + quote) for the COMPLETED day, then clear the RDB.
+/ Call at date rollover.
+savedown:{[dt] saveTable[dt;`trade]; saveTable[dt;`quote]; 0};
 
 / Convenience: persist whatever is buffered under today's date (manual flush).
 flush:{savedown[.z.d]};
 
 -1"nano_tick schema loaded (RDB/writer). HDB=",(1_string HDB),
-  " | insertRaw[rows] to load, savedown[date] to persist.";
+  " | insertRaw/insertRawQuote to load, savedown[date] to persist.";

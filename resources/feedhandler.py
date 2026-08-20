@@ -1,9 +1,10 @@
-"""Live feedhandler (runs on the 4B): MQTT ticks/# -> kdb RDB.
+"""Live feedhandler (runs on the 4B): MQTT ticks/# + quotes/# -> kdb RDB.
 
-Consumes the normalised tick feed the 3A+ publishes and inserts it into the
-in-memory RDB via RdbRoller (which savedowns at the UTC day boundary). On
-startup it runs the REST bridge to close the gap between archived history and
-the live stream, so the store is gap-free.
+Consumes the normalised trade and quote feeds the 3A+ publishes and inserts
+them into the in-memory RDB (trade + quote tables) via RdbRoller, which
+savedowns both at the UTC day boundary. On startup it REST-bridges the trade
+gap between archived history and the live stream so trades are gap-free; quotes
+are live-only (no historical source), so they simply start on connect.
 
 kdb is single-threaded, so paho's network thread only ENQUEUES; all kdb work
 (bridge + inserts) happens on the main thread draining the queue.
@@ -21,8 +22,8 @@ from resources import binance as binance_data
 logger = logging.getLogger("feedhandler")
 
 QUEUE_MAXSIZE = 200_000   # bounded so a slow consumer can't grow memory unbounded
-BATCH_MAX = 5_000         # ticks coalesced into one insert
-BATCH_TIMEOUT = 0.5       # seconds to block for the next tick before re-checking stop
+BATCH_MAX = 5_000         # records coalesced into one insert
+BATCH_TIMEOUT = 0.5       # seconds to block for the next record before re-checking stop
 
 
 class FeedHandler:
@@ -31,11 +32,12 @@ class FeedHandler:
         self._writer = writer
         self._roller = roller if roller is not None else backfill.RdbRoller(writer)
         self._queue: queue.Queue = queue.Queue(maxsize=QUEUE_MAXSIZE)
-        self._last_id = None
+        self._last_id = None          # trade dedup floor
+        self._last_quote_id = None    # quote dedup floor
         self._dropped = 0
         self._stop = False
-        self._connected_once = False   # first connect vs reconnect
-        self._needs_rebridge = False   # set by paho thread on reconnect, handled on main
+        self._connected_once = False
+        self._needs_rebridge = False  # set on (re)connect; the first live trade closes the gap
         self._client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
             client_id="nano_tick_feedhandler",
@@ -48,49 +50,67 @@ class FeedHandler:
     # --- paho network thread: enqueue only, never touch kdb --------------
 
     def _on_connect(self, client, userdata, flags, reason_code, properties) -> None:
-        client.subscribe("ticks/#", qos=1)
+        client.subscribe([("ticks/#", 1), ("quotes/#", 1)])
         if self._connected_once:
-            # A reconnect: the broker may have dropped messages during a long
-            # outage. Flag the main thread to REST-bridge any gap (kdb is
+            # A reconnect: trades may have been dropped during a long outage.
+            # Flag the main thread to REST-bridge the trade gap (kdb is
             # single-threaded, so this callback must not bridge itself).
-            logger.warning("reconnected to broker; will re-bridge any gap")
+            logger.warning("reconnected to broker; will re-bridge any trade gap")
             self._needs_rebridge = True
         else:
             self._connected_once = True
-            logger.info("connected to broker (%s), subscribing to ticks/#", reason_code)
+            logger.info("connected to broker (%s), subscribing to ticks/# + quotes/#",
+                        reason_code)
 
     def _on_message(self, client, userdata, msg) -> None:
         try:
-            tick = json.loads(msg.payload)
-            int(tick["trade_id"])
+            payload = json.loads(msg.payload)
+            if msg.topic.startswith("quotes/"):
+                int(payload["update_id"])
+                kind = "quote"
+            else:
+                int(payload["trade_id"])
+                kind = "trade"
         except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-            logger.warning("dropping malformed tick on %s", msg.topic)
+            logger.warning("dropping malformed message on %s", msg.topic)
             return
         try:
-            self._queue.put_nowait(tick)
+            self._queue.put_nowait((kind, payload))
         except queue.Full:
             self._dropped += 1
             if self._dropped % 1000 == 1:
-                logger.warning("feed queue full, dropped %d ticks so far", self._dropped)
+                logger.warning("feed queue full, dropped %d records so far", self._dropped)
 
     # --- main thread: all kdb access -------------------------------------
 
-    def _apply(self, ticks: list) -> int:
-        """Sort, dedup by trade_id, and feed the roller. Main thread only."""
+    @staticmethod
+    def _dedup(items: list, key: str, last):
+        """Sort by `key` and keep only ids strictly above `last`."""
         fresh = []
-        last = self._last_id
-        for t in sorted(ticks, key=lambda t: t["trade_id"]):
-            if last is None or t["trade_id"] > last:
-                fresh.append(t)
-                last = t["trade_id"]
-        if not fresh:
+        for it in sorted(items, key=lambda x: x[key]):
+            if last is None or it[key] > last:
+                fresh.append(it)
+                last = it[key]
+        return fresh, last
+
+    def _apply_trades(self, trades: list) -> int:
+        if not trades:
             return 0
-        self._last_id = last
-        self._roller.feed(binance_data.parse_live_ticks(fresh))
+        fresh, self._last_id = self._dedup(trades, "trade_id", self._last_id)
+        if fresh:
+            self._roller.feed(binance_data.parse_live_ticks(fresh))
         return len(fresh)
 
-    def _drain(self, first: dict) -> list:
-        """Coalesce `first` plus whatever else is already queued (up to BATCH_MAX)."""
+    def _apply_quotes(self, quotes: list) -> int:
+        if not quotes:
+            return 0
+        fresh, self._last_quote_id = self._dedup(quotes, "update_id", self._last_quote_id)
+        if fresh:
+            self._roller.feed_quote(binance_data.parse_live_quotes(fresh))
+        return len(fresh)
+
+    def _drain(self, first: tuple) -> list:
+        """Coalesce `first` plus whatever else is queued (up to BATCH_MAX)."""
         batch = [first]
         while len(batch) < BATCH_MAX:
             try:
@@ -99,18 +119,18 @@ class FeedHandler:
                 break
         return batch
 
-    def _maybe_rebridge(self, batch: list) -> None:
-        """After a reconnect, if the first genuinely-new tick jumps past
-        last_id+1 the broker dropped messages during the outage — REST-bridge
-        the gap [last_id+1 .. first_new). Only clears the flag once a new tick
-        has actually arrived, so stale backlog can't clear it prematurely."""
-        new_ids = [t["trade_id"] for t in batch
+    def _maybe_rebridge(self, trades: list) -> None:
+        """After (re)connect, if the first genuinely-new trade jumps past
+        last_id+1, the broker dropped messages — REST-bridge [last_id+1 .. it).
+        Only clears the flag once a new trade has arrived, so stale backlog
+        can't clear it prematurely."""
+        new_ids = [t["trade_id"] for t in trades
                    if self._last_id is None or t["trade_id"] > self._last_id]
         if not new_ids:
-            return  # only stale/duplicate ticks so far; keep waiting
+            return
         first_new = min(new_ids)
         if self._last_id is not None and first_new > self._last_id + 1:
-            logger.warning("reconnect gap [%d .. %d); bridging via REST",
+            logger.warning("trade gap [%d .. %d); bridging via REST",
                            self._last_id + 1, first_new)
             backfill.bridge(self._config, self._writer, target_id=first_new)
             self._last_id = self._writer.max_stored_id()
@@ -123,32 +143,28 @@ class FeedHandler:
             except ValueError:
                 pass  # not the main thread (e.g. tests)
 
-        # 1) REST-catch-up to the live tip before subscribing.
+        # 1) REST-catch-up the trade history to the live tip before subscribing.
         backfill.bridge(self._config, self._writer)
         self._last_id = self._writer.max_stored_id()
+        self._last_quote_id = self._writer.max_stored_quote_id()
+        self._needs_rebridge = True  # first live trade closes the startup gap
 
         self._client.connect_async(self._config.mqtt_host, self._config.mqtt_port)
         self._client.loop_start()
 
-        # 2) first live tick fixes F; bridge the small startup gap [last_id+1, F).
-        first = self._queue.get()
-        target = first["trade_id"]
-        if self._last_id is not None and target > self._last_id + 1:
-            backfill.bridge(self._config, self._writer, target_id=target)
-            self._last_id = self._writer.max_stored_id()
-
-        # 3) live loop.
-        self._apply(self._drain(first))
-        logger.info("live; last_id=%s", self._last_id)
+        logger.info("live; last_id=%s last_quote_id=%s", self._last_id, self._last_quote_id)
         while not self._stop:
             try:
-                nxt = self._queue.get(timeout=BATCH_TIMEOUT)
+                first = self._queue.get(timeout=BATCH_TIMEOUT)
             except queue.Empty:
                 continue
-            batch = self._drain(nxt)
-            if self._needs_rebridge:
-                self._maybe_rebridge(batch)
-            self._apply(batch)
+            batch = self._drain(first)
+            trades = [m for k, m in batch if k == "trade"]
+            quotes = [m for k, m in batch if k == "quote"]
+            if self._needs_rebridge and trades:
+                self._maybe_rebridge(trades)
+            self._apply_trades(trades)
+            self._apply_quotes(quotes)
 
         self._shutdown()
 
@@ -159,4 +175,4 @@ class FeedHandler:
         logger.info("shutting down; flushing RDB to HDB")
         self._client.loop_stop()
         self._client.disconnect()
-        self._roller.flush()  # savedown the current day so it isn't lost
+        self._roller.flush()  # savedown the current day (trade + quote)
