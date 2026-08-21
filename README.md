@@ -30,9 +30,10 @@ evaluation pipeline has its own runbook in
   - `analytics.q` — q feature functions (bars, quote features, as-of join, labels)
   - `app.py` — 4B writer entry point (startup backfill + prune, then the live feed)
   - `*_test.q` + `run_q_tests.py` — q unit tests and their pykx runner
-  - broker config, recorder service, `setup.sh`
+  - broker config, `recorder.service` + `writer.service` units, `setup.sh`
   - `KDBX_SETUP.md` — KDB-X licensing / install / backfill+retention design
   - `RESEARCH.md` — **the storage → analytics → evaluation runbook** (start here for the query side)
+  - `DEPLOY.md` — **two-Pi go-live runbook** (bring-up order, cold-start, verification)
 - `resources/` — the 4B data-handling modules (imported by `platform/app.py` and the CLIs):
   `backfill.py` (archive + REST backfill, prune, RDB rollover), `feedhandler.py` (MQTT → kdb),
   `recorder.py` (NDJSON fallback), `reader.py` (`HdbReader`: q → pandas),

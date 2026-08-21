@@ -5,8 +5,7 @@
 set -e
 
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_DIR="$(dirname "$APP_DIR")"    # recorder.py now lives in ../resources
-SERVICE_NAME="recorder.service"
+REPO_DIR="$(dirname "$APP_DIR")"    # recorder.py in ../resources; app.py in platform/
 
 # Service identity: whoever runs this script (survives sudo invocation).
 RUN_USER="${SUDO_USER:-$USER}"
@@ -36,16 +35,36 @@ source venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r "$APP_DIR"/requirements.txt
 
-# Fill in user/group/paths so nothing is hardcoded to a particular flash username
-sed -e "s|__USER__|$RUN_USER|g" \
-    -e "s|__GROUP__|$RUN_GROUP|g" \
-    -e "s|__APP_DIR__|$APP_DIR|g" \
-    -e "s|__REPO_DIR__|$REPO_DIR|g" \
-    "$APP_DIR/$SERVICE_NAME" | sudo tee /etc/systemd/system/$SERVICE_NAME > /dev/null
+# --- systemd units ---------------------------------------------------------
+# Fill user/group/paths (nothing hardcoded to a particular flash username) + install.
+install_unit() {
+    sed -e "s|__USER__|$RUN_USER|g" \
+        -e "s|__GROUP__|$RUN_GROUP|g" \
+        -e "s|__APP_DIR__|$APP_DIR|g" \
+        -e "s|__REPO_DIR__|$REPO_DIR|g" \
+        "$APP_DIR/$1" | sudo tee "/etc/systemd/system/$1" > /dev/null
+}
+
+install_unit recorder.service
+install_unit writer.service
 sudo systemctl daemon-reload
-sudo systemctl enable $SERVICE_NAME
-sudo systemctl start $SERVICE_NAME
-sudo systemctl status $SERVICE_NAME --no-pager
+
+# Recorder (NDJSON fallback) needs only paho — start it now.
+sudo systemctl enable recorder.service
+sudo systemctl restart recorder.service
+
+# Writer (KDB-X, app.py) needs pykx's licence; enable it, but only start once the
+# licence is in place (see platform/KDBX_SETUP.md).
+USER_HOME="$(getent passwd "$RUN_USER" | cut -d: -f6)"
+sudo systemctl enable writer.service
+if [ -f "$USER_HOME/.kx/kc.lic" ]; then
+    sudo systemctl restart writer.service
+else
+    echo "writer.service enabled but NOT started: no KDB-X licence at $USER_HOME/.kx/kc.lic."
+    echo "Install KDB-X (platform/KDBX_SETUP.md), then: sudo systemctl start writer.service"
+fi
+
+sudo systemctl status recorder.service --no-pager
 
 # Since this is a one time startup script, create a marker file to indicate
 # that it has been run before
