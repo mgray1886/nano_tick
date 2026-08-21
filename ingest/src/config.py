@@ -5,7 +5,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class Config:
     log_level: str
-    symbol: str
+    symbols: tuple  # instruments to stream, e.g. ("btcusdt", "ethusdt", "solusdt")
     stream_quotes: bool  # also stream @bookTicker quotes alongside trades
     sink_type: str  # "mqtt" (default) or "tcp" (legacy fallback)
     mqtt_host: str
@@ -18,9 +18,12 @@ class Config:
     @classmethod
     def from_env(cls) -> "Config":
         """Build config from environment (populated by systemd EnvironmentFile=.env)."""
+        # SYMBOLS (comma-separated) for multi-instrument; SYMBOL kept for one.
+        raw = os.environ.get("SYMBOLS") or os.environ.get("SYMBOL", "btcusdt")
+        symbols = tuple(s.strip().lower() for s in raw.split(",") if s.strip())
         return cls(
             log_level=os.environ.get("LOG_LEVEL", "INFO"),
-            symbol=os.environ.get("SYMBOL", "btcusdt"),
+            symbols=symbols,
             stream_quotes=os.environ.get("STREAM_QUOTES", "true").lower() != "false",
             sink_type=os.environ.get("SINK_TYPE", "mqtt"),
             mqtt_host=os.environ.get("MQTT_HOST", "192.168.100.2"),

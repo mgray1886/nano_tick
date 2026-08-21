@@ -40,7 +40,7 @@ services:
     environment:
       SINK_TYPE: mqtt
       MQTT_HOST: broker
-      SYMBOL: btcusdt
+      SYMBOLS: btcusdt,ethusdt,solusdt
       LOG_LEVEL: INFO
     depends_on:
       - broker

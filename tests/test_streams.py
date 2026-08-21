@@ -81,6 +81,14 @@ def test_binance_combined_stream_url():
         "wss://stream.binance.com:9443/stream?streams=btcusdt@trade")
 
 
+def test_binance_combined_stream_url_multi_symbol():
+    # one websocket multiplexes trade + bookTicker for every symbol
+    assert BinanceCombinedStream(["BTCUSDT", "ethusdt", "SOLUSDT"]).url() == (
+        "wss://stream.binance.com:9443/stream?streams="
+        "btcusdt@trade/btcusdt@bookTicker/ethusdt@trade/ethusdt@bookTicker/"
+        "solusdt@trade/solusdt@bookTicker")
+
+
 def test_messages_yields_parsed_json(monkeypatch):
     install_connections(monkeypatch, [FakeConnection([json.dumps({"n": 1}), json.dumps({"n": 2})])])
     assert asyncio.run(take(FakeStream(), 2)) == [{"n": 1}, {"n": 2}]

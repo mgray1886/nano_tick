@@ -33,7 +33,7 @@ def start_sink(config: Config) -> Sink:
 
 
 async def run(config: Config, sink: Sink) -> None:
-    stream = BinanceCombinedStream(config.symbol, quotes=config.stream_quotes)
+    stream = BinanceCombinedStream(config.symbols, quotes=config.stream_quotes)
     async for msg in stream.messages():
         try:
             # Combined-stream messages are wrapped: {"stream": ..., "data": ...}

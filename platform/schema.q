@@ -97,6 +97,19 @@ insertRawQuote:{[rows]
 / Tickerplant-style hook, so migrating to kdb+tick later needs no bridge change.
 upd:{[t;x] t insert x};
 
+/ Restart-safe per-symbol max id (read side). Trade/quote ids are per-symbol
+/ sequences, so a column's global max isn't a symbol's max. Read the newest
+/ partition's id + sym column files directly, filtered by `s`: loads the sym enum
+/ domain, no `\l` (which would clash with the in-memory RDB table of the same
+/ name). -1 when `s` has no rows in that partition. `hdbDir`/`p`/`tbl`/`col` are
+/ strings; `s` a symbol.
+partMaxId:{[hdbDir;p;tbl;col;s]
+  sym::get hsym `$hdbDir,"/sym";
+  ids:get hsym `$p,"/",tbl,"/",col;
+  syms:get hsym `$p,"/",tbl,"/sym";
+  m:ids where syms=s;
+  $[count m; max m; -1] };
+
 / --- persistence -----------------------------------------------------
 / Append one in-memory table `t` to the HDB as partition `dt` (a date):
 / splayed, time-then-sym sorted, with the `p#` attribute on sym (all via
