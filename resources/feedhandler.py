@@ -32,12 +32,13 @@ class FeedHandler:
         self._writer = writer
         self._roller = roller if roller is not None else backfill.RdbRoller(writer)
         self._queue: queue.Queue = queue.Queue(maxsize=QUEUE_MAXSIZE)
-        self._last_id = None          # trade dedup floor
-        self._last_quote_id = None    # quote dedup floor
+        self._symbols = list(config.symbols)   # instruments we bridge + track
+        self._last_id = {}            # sym -> last trade id seen (dedup floor)
+        self._last_quote_id = {}      # sym -> last update id seen (dedup floor)
+        self._pending_rebridge = set()  # syms whose gap the next live trade should close
         self._dropped = 0
         self._stop = False
         self._connected_once = False
-        self._needs_rebridge = False  # set on (re)connect; the first live trade closes the gap
         self._client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
             client_id="nano_tick_feedhandler",
@@ -53,10 +54,10 @@ class FeedHandler:
         client.subscribe([("ticks/#", 1), ("quotes/#", 1)])
         if self._connected_once:
             # A reconnect: trades may have been dropped during a long outage.
-            # Flag the main thread to REST-bridge the trade gap (kdb is
+            # Flag the main thread to REST-bridge each symbol's trade gap (kdb is
             # single-threaded, so this callback must not bridge itself).
             logger.warning("reconnected to broker; will re-bridge any trade gap")
-            self._needs_rebridge = True
+            self._pending_rebridge = set(self._symbols)
         else:
             self._connected_once = True
             logger.info("connected to broker (%s), subscribing to ticks/# + quotes/#",
@@ -93,21 +94,35 @@ class FeedHandler:
                 last = it[key]
         return fresh, last
 
+    @staticmethod
+    def _by_symbol(items: list) -> dict:
+        """Group records by their `symbol` — ids are per-symbol, so dedup and the
+        bridge must be per-symbol."""
+        groups: dict = {}
+        for it in items:
+            groups.setdefault(it["symbol"], []).append(it)
+        return groups
+
     def _apply_trades(self, trades: list) -> int:
-        if not trades:
-            return 0
-        fresh, self._last_id = self._dedup(trades, "trade_id", self._last_id)
-        if fresh:
-            self._roller.feed(binance_data.parse_live_ticks(fresh))
-        return len(fresh)
+        total = 0
+        for sym, group in self._by_symbol(trades).items():
+            if sym in self._pending_rebridge:
+                self._maybe_rebridge(sym, group)   # may bridge + advance _last_id[sym]
+            fresh, self._last_id[sym] = self._dedup(group, "trade_id", self._last_id.get(sym))
+            if fresh:
+                self._roller.feed(binance_data.parse_live_ticks(fresh))
+                total += len(fresh)
+        return total
 
     def _apply_quotes(self, quotes: list) -> int:
-        if not quotes:
-            return 0
-        fresh, self._last_quote_id = self._dedup(quotes, "update_id", self._last_quote_id)
-        if fresh:
-            self._roller.feed_quote(binance_data.parse_live_quotes(fresh))
-        return len(fresh)
+        total = 0
+        for sym, group in self._by_symbol(quotes).items():
+            fresh, self._last_quote_id[sym] = self._dedup(
+                group, "update_id", self._last_quote_id.get(sym))
+            if fresh:
+                self._roller.feed_quote(binance_data.parse_live_quotes(fresh))
+                total += len(fresh)
+        return total
 
     def _drain(self, first: tuple) -> list:
         """Coalesce `first` plus whatever else is queued (up to BATCH_MAX)."""
@@ -119,22 +134,21 @@ class FeedHandler:
                 break
         return batch
 
-    def _maybe_rebridge(self, trades: list) -> None:
-        """After (re)connect, if the first genuinely-new trade jumps past
+    def _maybe_rebridge(self, sym: str, trades: list) -> None:
+        """After (re)connect, if `sym`'s first genuinely-new trade jumps past
         last_id+1, the broker dropped messages — REST-bridge [last_id+1 .. it).
         Only clears the flag once a new trade has arrived, so stale backlog
         can't clear it prematurely."""
-        new_ids = [t["trade_id"] for t in trades
-                   if self._last_id is None or t["trade_id"] > self._last_id]
+        last = self._last_id.get(sym)
+        new_ids = [t["trade_id"] for t in trades if last is None or t["trade_id"] > last]
         if not new_ids:
             return
         first_new = min(new_ids)
-        if self._last_id is not None and first_new > self._last_id + 1:
-            logger.warning("trade gap [%d .. %d); bridging via REST",
-                           self._last_id + 1, first_new)
-            backfill.bridge(self._config, self._writer, target_id=first_new)
-            self._last_id = self._writer.max_stored_id()
-        self._needs_rebridge = False
+        if last is not None and first_new > last + 1:
+            logger.warning("%s trade gap [%d .. %d); bridging via REST", sym, last + 1, first_new)
+            backfill.bridge(self._config, self._writer, sym, target_id=first_new)
+            self._last_id[sym] = self._writer.max_stored_id(sym)
+        self._pending_rebridge.discard(sym)
 
     def run(self) -> None:
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -143,16 +157,17 @@ class FeedHandler:
             except ValueError:
                 pass  # not the main thread (e.g. tests)
 
-        # 1) REST-catch-up the trade history to the live tip before subscribing.
-        backfill.bridge(self._config, self._writer)
-        self._last_id = self._writer.max_stored_id()
-        self._last_quote_id = self._writer.max_stored_quote_id()
-        self._needs_rebridge = True  # first live trade closes the startup gap
+        # 1) REST-catch-up each symbol's trade history to the live tip before subscribing.
+        for sym in self._symbols:
+            backfill.bridge(self._config, self._writer, sym)
+            self._last_id[sym] = self._writer.max_stored_id(sym)
+            self._last_quote_id[sym] = self._writer.max_stored_quote_id(sym)
+        self._pending_rebridge = set(self._symbols)  # first live trade per symbol closes the gap
 
         self._client.connect_async(self._config.mqtt_host, self._config.mqtt_port)
         self._client.loop_start()
 
-        logger.info("live; last_id=%s last_quote_id=%s", self._last_id, self._last_quote_id)
+        logger.info("live; tracking %d symbol(s): %s", len(self._symbols), self._last_id)
         while not self._stop:
             try:
                 first = self._queue.get(timeout=BATCH_TIMEOUT)
@@ -161,9 +176,7 @@ class FeedHandler:
             batch = self._drain(first)
             trades = [m for k, m in batch if k == "trade"]
             quotes = [m for k, m in batch if k == "quote"]
-            if self._needs_rebridge and trades:
-                self._maybe_rebridge(trades)
-            self._apply_trades(trades)
+            self._apply_trades(trades)   # per-symbol dedup; rebridges pending gaps
             self._apply_quotes(quotes)
 
         self._shutdown()

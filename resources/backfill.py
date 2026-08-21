@@ -19,7 +19,7 @@ import shutil
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Iterable, Iterator, Optional
+from typing import Callable, Iterator, Optional
 
 from clients import binance as binance_client
 from resources import binance as binance_data
@@ -78,6 +78,21 @@ def latest_partition_tradeid_path(hdb_path: Path) -> Optional[Path]:
     return latest_partition_col(hdb_path, "trade", "tradeID")
 
 
+def latest_partition_dir(hdb_path: Path, table: str) -> Optional[Path]:
+    """Newest date-partition dir holding `table`, or None. Used to read a single
+    symbol's max id out of that partition (ids are per-symbol, so the global
+    column max isn't a symbol's max)."""
+    dates = []
+    if hdb_path.exists():
+        for entry in hdb_path.iterdir():
+            if entry.is_dir() and (entry / table).exists():
+                try:
+                    dates.append((datetime.strptime(entry.name, "%Y.%m.%d").date(), entry))
+                except ValueError:
+                    continue
+    return max(dates)[1] if dates else None
+
+
 # --- write path (pykx bridge; needs a licensed q) --------------------------
 
 class HdbWriter:
@@ -134,30 +149,28 @@ class HdbWriter:
         """Persist the RDB (trade + quote) to the HDB partition, then clear."""
         self._kx.q("savedown", day)  # .Q.dpft on both tables
 
-    def _max_id(self, table: str, col: str) -> Optional[int]:
+    def _max_id(self, table: str, col: str, symbol: str) -> Optional[int]:
         kx = self._kx
-        if int(kx.q(f"count {table}").py()) > 0:      # RDB has today's data
-            return int(kx.q(f"exec max {col} from {table}").py())
-        # RDB empty: read the newest partition's id column directly. No \l, so
-        # it neither clobbers the live table nor hits 'nyi from exec-over-parts.
-        path = latest_partition_col(self._hdb_path, table, col)
-        if path is None:
+        s = kx.SymbolAtom(symbol)
+        if int(kx.q(f"{{count select from {table} where sym=x}}", s).py()) > 0:  # in the RDB
+            return int(kx.q(f"{{exec max {col} from {table} where sym=x}}", s).py())
+        # RDB empty for this symbol: read the newest partition's id column filtered
+        # by sym (schema.q partMaxId — no \l, so it can't clobber the RDB table).
+        part = latest_partition_dir(self._hdb_path, table)
+        if part is None:
             return None
-        return int(kx.q("{max get hsym x}", kx.SymbolAtom(str(path))).py())
+        v = int(kx.q("partMaxId", kx.CharVector(self._hdb_path.as_posix()),
+                     kx.CharVector(part.as_posix()), kx.CharVector(table),
+                     kx.CharVector(col), s).py())
+        return None if v < 0 else v
 
-    def max_stored_id(self) -> Optional[int]:
-        """Highest trade_id in the store — the trade gap bridge fetches from here."""
-        return self._max_id("trade", "tradeID")
+    def max_stored_id(self, symbol: str) -> Optional[int]:
+        """Highest trade_id stored for `symbol` — the bridge fetches from here."""
+        return self._max_id("trade", "tradeID", symbol)
 
-    def max_stored_quote_id(self) -> Optional[int]:
-        """Highest quote update_id in the store — for restart-safe quote dedup."""
-        return self._max_id("quote", "updateID")
-
-    def write_day(self, day: date, chunks: Iterable[dict]) -> int:
-        """Backfill a whole archived day: insert its chunks, then savedown."""
-        total = sum(self.insert(cols) for cols in chunks)
-        self.savedown(day)
-        return total
+    def max_stored_quote_id(self, symbol: str) -> Optional[int]:
+        """Highest quote update_id stored for `symbol` — restart-safe quote dedup."""
+        return self._max_id("quote", "updateID", symbol)
 
 
 # --- live RDB rollover ------------------------------------------------------
@@ -217,7 +230,7 @@ class RdbRoller:
 
 @dataclass(frozen=True)
 class BackfillConfig:
-    symbol: str
+    symbols: tuple   # instruments, e.g. ("BTCUSDT", "ETHUSDT", "SOLUSDT")
     venue: str
     days: int
     chunk_size: int
@@ -229,8 +242,11 @@ class BackfillConfig:
 
     @classmethod
     def from_env(cls) -> "BackfillConfig":
+        # SYMBOLS (comma-separated) for multi-instrument; SYMBOL kept for one.
+        raw = os.environ.get("SYMBOLS") or os.environ.get("SYMBOL", "BTCUSDT")
+        symbols = tuple(s.strip().upper() for s in raw.split(",") if s.strip())
         return cls(
-            symbol=os.environ.get("SYMBOL", "BTCUSDT").upper(),
+            symbols=symbols,
             venue=os.environ.get("VENUE", "binance"),
             days=int(os.environ.get("BACKFILL_DAYS", "30")),
             chunk_size=int(os.environ.get("BACKFILL_CHUNK", "500000")),
@@ -247,29 +263,41 @@ class BackfillConfig:
 def run_backfill(
     dates: list[date],
     existing_dates: set[date],
-    fetch_day: Callable[[date], Optional[Iterable[dict]]],
+    symbols: tuple,
+    fetchers: dict,
     writer,
 ) -> dict:
-    """Fetch and write each missing day. fetch_day returns chunk iterables, or
-    None if the archive lacks that day. Injectable for tests."""
+    """Fetch and write each missing day for EVERY symbol, then savedown the day
+    once so all symbols share the partition (a per-symbol savedown would have
+    .Q.dpft overwrite the day). `fetchers[sym](day)` returns chunk iterables, or
+    None if the archive lacks that symbol/day. Injectable for tests.
+
+    NB: a date already present is skipped wholesale — so adding a NEW symbol to an
+    existing HDB needs a rebuild (fresh deploys, which add all symbols up front,
+    are unaffected)."""
     summary = {"written": 0, "rows": 0, "skipped": 0, "missing": 0, "failed": 0}
     for day in dates:
         if day in existing_dates:
             summary["skipped"] += 1
             continue
-        try:
-            chunks = fetch_day(day)
-            if chunks is None:
-                logger.warning("archive has no data for %s yet; skipping", day)
-                summary["missing"] += 1
-                continue
-            rows = writer.write_day(day, chunks)
+        wrote = False
+        for sym in symbols:
+            try:
+                chunks = fetchers[sym](day)
+                if chunks is None:
+                    logger.warning("archive has no %s data for %s yet; skipping", sym, day)
+                    summary["missing"] += 1
+                    continue
+                rows = sum(writer.insert(cols) for cols in chunks)
+                summary["rows"] += rows
+                wrote = True
+                logger.info("buffered %s %s: %d trades", sym, day, rows)
+            except Exception:
+                logger.exception("failed to backfill %s %s", sym, day)
+                summary["failed"] += 1
+        if wrote:
+            writer.savedown(day)              # one partition holds all symbols
             summary["written"] += 1
-            summary["rows"] += rows
-            logger.info("wrote %s: %d trades", day, rows)
-        except Exception:
-            logger.exception("failed to backfill %s", day)
-            summary["failed"] += 1
     return summary
 
 
@@ -295,18 +323,19 @@ def run(config: BackfillConfig, writer: Optional[HdbWriter] = None) -> dict:
     summary.
     """
     dates = plan_dates(datetime.now(timezone.utc).date(), config.days)
+    syms = ",".join(config.symbols)
     if not dates:
-        logger.info("backfill %s: nothing to fill (days=%d)", config.symbol, config.days)
+        logger.info("backfill %s: nothing to fill (days=%d)", syms, config.days)
         return {"written": 0, "rows": 0, "skipped": 0, "missing": 0, "failed": 0}
     existing = existing_partition_dates(config.hdb_path)
     logger.info(
         "backfill %s: %d days [%s .. %s], %d already in HDB",
-        config.symbol, config.days, dates[0], dates[-1], len(existing & set(dates)),
+        syms, config.days, dates[0], dates[-1], len(existing & set(dates)),
     )
     if writer is None:
         writer = HdbWriter(config.hdb_path, config.schema_q)
-    fetch_day = make_fetch_day(config.symbol, config.venue, config.chunk_size)
-    summary = run_backfill(dates, existing, fetch_day, writer)
+    fetchers = {s: make_fetch_day(s, config.venue, config.chunk_size) for s in config.symbols}
+    summary = run_backfill(dates, existing, config.symbols, fetchers, writer)
     logger.info(
         "backfill done: %(written)d days written (%(rows)d trades), "
         "%(skipped)d already present, %(missing)d not published, %(failed)d failed",
@@ -317,12 +346,13 @@ def run(config: BackfillConfig, writer: Optional[HdbWriter] = None) -> dict:
 
 # --- current-day gap bridge (REST) -----------------------------------------
 
-def bridge(config: BackfillConfig, writer: HdbWriter, target_id: Optional[int] = None,
-           page: int = binance_client.TRADES_LIMIT,
+def bridge(config: BackfillConfig, writer: HdbWriter, symbol: str,
+           target_id: Optional[int] = None, page: int = binance_client.TRADES_LIMIT,
            pacer: Optional[binance_client.WeightPacer] = None) -> dict:
-    """Fill trades from the last stored id up to `target_id` (exclusive — the
-    live stream's first id) by paging REST. With target_id=None, fills up to
-    the current tip. Dedup is downstream by tradeID; here we just page forward.
+    """Fill `symbol`'s trades from its last stored id up to `target_id`
+    (exclusive — the live stream's first id) by paging REST. With target_id=None,
+    fills up to the current tip. Dedup is downstream by (sym, tradeID); here we
+    just page forward.
 
     Gap-free by construction: pages advance contiguously by trade id
     (`start = last id + 1`), and rate-limit backoff inside the client retries the
@@ -332,25 +362,25 @@ def bridge(config: BackfillConfig, writer: HdbWriter, target_id: Optional[int] =
     """
     if pacer is None:
         pacer = binance_client.WeightPacer()
-    floor = writer.max_stored_id()
+    floor = writer.max_stored_id(symbol)
     if floor is None:
-        logger.warning("no stored trade_id to bridge from; skipping REST bridge")
+        logger.warning("no stored %s trade_id to bridge from; skipping REST bridge", symbol)
         return {"inserted": 0, "from_id": None}
     start = floor + 1
     inserted = 0
     while target_id is None or start < target_id:
-        trades = binance_client.fetch_trades(config.symbol, start, page, config.api_key, pacer=pacer)
+        trades = binance_client.fetch_trades(symbol, start, page, config.api_key, pacer=pacer)
         if not trades:
             break
         if target_id is not None:
             trades = [t for t in trades if int(t["id"]) < target_id]
             if not trades:
                 break
-        inserted += writer.insert(binance_data.parse_rest_trades(trades, config.symbol, config.venue))
+        inserted += writer.insert(binance_data.parse_rest_trades(trades, symbol, config.venue))
         start = int(trades[-1]["id"]) + 1
         if len(trades) < page:  # caught up to the live tip
             break
-    logger.info("bridge: inserted %d trades from id %d", inserted, floor + 1)
+    logger.info("bridge %s: inserted %d trades from id %d", symbol, inserted, floor + 1)
     return {"inserted": inserted, "from_id": floor + 1}
 
 

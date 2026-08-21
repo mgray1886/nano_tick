@@ -9,7 +9,7 @@ from src.sinks.tcp import TcpSink
 
 def config(**overrides) -> Config:
     base = dict(
-        log_level="INFO", symbol="btcusdt", stream_quotes=True, sink_type="mqtt",
+        log_level="INFO", symbols=("btcusdt",), stream_quotes=True, sink_type="mqtt",
         mqtt_host="example.invalid", mqtt_port=1883, mqtt_max_queued=100,
         sink_host="127.0.0.1", sink_port=1, sink_buffer_mb=1,
     )

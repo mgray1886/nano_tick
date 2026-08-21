@@ -42,16 +42,19 @@ mosquitto_sub -h 192.168.100.2 -t 'ticks/#' -t 'quotes/#' -v   # both topics sho
    - `HDB_PATH` → SSD path (e.g. `/mnt/ssd/nano_tick_hdb`)
    - `SYMBOL` (`BTCUSDT`), `VENUE` (`binance`)
    - `BACKFILL_DAYS` (30 to start, 90 later) — sizes **both** the backfill window and retention
+   - `SYMBOLS` (`btcusdt,ethusdt,solusdt`) — comma-separated instruments (or `SYMBOL` for one)
    - `MQTT_HOST` (`192.168.100.2`), `MQTT_PORT` (`1883`)
    - `BINANCE_API_KEY` (optional) — raises the REST weight cap; speeds the cold-start bridge
-3. Run the writer app (needs the licensed q via pykx):
+3. Run the writer app (needs pykx + a KDB-X licence at `~/.kx/kc.lic`):
 
    ```bash
-   HDB_PATH=/mnt/ssd/nano_tick_hdb BACKFILL_DAYS=30 python platform/app.py
+   HDB_PATH=/mnt/ssd/nano_tick_hdb BACKFILL_DAYS=30 SYMBOLS=btcusdt,ethusdt,solusdt python platform/app.py
    ```
 
-   As a service, mirror `recorder.service` (a `writer.service` unit with
-   `Restart=always`, `MemoryMax` sized to the 4B).
+   `platform/setup.sh` installs it as **`writer.service`** (`Restart=always`,
+   `MemoryMax` sized to the 4B; it's the memory-dominant process). setup.sh
+   enables it but only *starts* it once `~/.kx/kc.lic` exists — after installing
+   KDB-X (KDBX_SETUP.md), `sudo systemctl start writer.service`.
 
 `app.py` sequence: build the writer → `backfill.run` (archive) → `prune` →
 `feedhandler.run` (REST-bridge to the live tip, then consume MQTT into the RDB;

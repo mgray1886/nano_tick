@@ -19,8 +19,8 @@ def make_zip(csv_text, name="BTCUSDT-trades-2026-07-15.csv"):
     return buf.getvalue()
 
 
-def _cfg(hdb, days=30):
-    return backfill.BackfillConfig(symbol="BTCUSDT", venue="binance", days=days,
+def _cfg(hdb, days=30, symbols=("BTCUSDT",)):
+    return backfill.BackfillConfig(symbols=symbols, venue="binance", days=days,
                                    chunk_size=10, hdb_path=hdb,
                                    schema_q=hdb / "schema.q")
 
@@ -89,19 +89,15 @@ def test_make_fetch_day_returns_none_when_not_published(monkeypatch):
 # --- archive orchestration -------------------------------------------------
 
 class FakeWriter:
-    """Records write_day/insert/savedown calls; stands in for HdbWriter."""
+    """Records insert/insert_quote/savedown; stands in for HdbWriter. Per-symbol
+    floors back max_stored_id (multi-symbol ids are independent sequences)."""
 
-    def __init__(self, floor=None):
-        self.writes = []
-        self.inserted = []
+    def __init__(self, floor=None, floors=None):
+        self.inserted = []           # trade ids inserted (across symbols)
         self.quote_inserted = []
         self.savedowns = []
         self._floor = floor
-
-    def write_day(self, day, chunks):
-        n = sum(len(c["tradeID"]) for c in chunks)
-        self.writes.append((day, n))
-        return n
+        self._floors = floors or {}
 
     def insert(self, cols):
         self.inserted.extend(cols["tradeID"])
@@ -114,14 +110,17 @@ class FakeWriter:
     def savedown(self, day):
         self.savedowns.append(day)
 
-    def max_stored_id(self):
-        return self._floor
+    def max_stored_id(self, symbol):
+        return self._floors.get(symbol, self._floor)
+
+    def max_stored_quote_id(self, symbol):
+        return self._floors.get(symbol, self._floor)
 
 
 def test_run_backfill_skips_existing_writes_missing_and_records_failures():
     d1, d2, d3, d4 = (date(2026, 7, d) for d in (12, 13, 14, 15))
 
-    def fetch_day(day):
+    def fetch(day):
         if day == d2:
             return [{"tradeID": [1, 2, 3]}]
         if day == d3:
@@ -131,19 +130,31 @@ def test_run_backfill_skips_existing_writes_missing_and_records_failures():
         raise AssertionError("unexpected fetch")
 
     writer = FakeWriter()
-    summary = backfill.run_backfill([d1, d2, d3, d4], {d1}, fetch_day, writer)
+    summary = backfill.run_backfill([d1, d2, d3, d4], {d1}, ("BTCUSDT",), {"BTCUSDT": fetch}, writer)
 
     assert summary == {"written": 1, "rows": 3, "skipped": 1, "missing": 1, "failed": 1}
-    assert writer.writes == [(d2, 3)]
+    assert writer.savedowns == [d2]          # only the day with data is savedowned
+    assert writer.inserted == [1, 2, 3]
+
+
+def test_run_backfill_multi_symbol_one_savedown_per_day():
+    day = date(2026, 7, 13)
+    fetchers = {"BTCUSDT": lambda d: [{"tradeID": [1, 2]}],
+                "ETHUSDT": lambda d: [{"tradeID": [10, 11, 12]}]}
+    writer = FakeWriter()
+    summary = backfill.run_backfill([day], set(), ("BTCUSDT", "ETHUSDT"), fetchers, writer)
+    assert summary["rows"] == 5              # both symbols' trades
+    assert writer.savedowns == [day]         # ONE savedown holds all symbols for the day
+    assert writer.inserted == [1, 2, 10, 11, 12]
 
 
 # --- config + run() resource -----------------------------------------------
 
 def test_config_from_env_defaults(monkeypatch):
-    for v in ("SYMBOL", "VENUE", "BACKFILL_DAYS", "BACKFILL_CHUNK", "HDB_PATH"):
+    for v in ("SYMBOL", "SYMBOLS", "VENUE", "BACKFILL_DAYS", "BACKFILL_CHUNK", "HDB_PATH"):
         monkeypatch.delenv(v, raising=False)
     cfg = backfill.BackfillConfig.from_env()
-    assert cfg.symbol == "BTCUSDT"
+    assert cfg.symbols == ("BTCUSDT",)
     assert cfg.venue == "binance"
     assert cfg.days == 30
     assert cfg.chunk_size == 500000
@@ -151,12 +162,12 @@ def test_config_from_env_defaults(monkeypatch):
     assert cfg.api_key is None
 
 
-def test_config_from_env_overrides(monkeypatch):
-    monkeypatch.setenv("SYMBOL", "ethusdt")
-    monkeypatch.setenv("BACKFILL_DAYS", "3")
-    cfg = backfill.BackfillConfig.from_env()
-    assert cfg.symbol == "ETHUSDT"  # upper()d
-    assert cfg.days == 3
+def test_config_from_env_symbols_list_and_precedence(monkeypatch):
+    monkeypatch.setenv("SYMBOLS", "btcusdt, ethusdt ,solusdt")
+    monkeypatch.setenv("SYMBOL", "adausdt")            # SYMBOLS wins when both set
+    assert backfill.BackfillConfig.from_env().symbols == ("BTCUSDT", "ETHUSDT", "SOLUSDT")
+    monkeypatch.delenv("SYMBOLS")
+    assert backfill.BackfillConfig.from_env().symbols == ("ADAUSDT",)  # falls back to SYMBOL
 
 
 def test_run_with_zero_days_is_noop(tmp_path):
@@ -164,7 +175,7 @@ def test_run_with_zero_days_is_noop(tmp_path):
     writer = FakeWriter()
     summary = backfill.run(_cfg(tmp_path, days=0), writer=writer)
     assert summary == {"written": 0, "rows": 0, "skipped": 0, "missing": 0, "failed": 0}
-    assert writer.writes == []
+    assert writer.savedowns == []
 
 
 def test_run_uses_injected_writer_without_touching_kdb(monkeypatch, tmp_path):
@@ -173,8 +184,8 @@ def test_run_uses_injected_writer_without_touching_kdb(monkeypatch, tmp_path):
                         lambda *a: (lambda day: [{"tradeID": [1]}]))
     writer = FakeWriter()
     summary = backfill.run(_cfg(tmp_path, days=2), writer=writer)
-    assert summary["written"] == 2       # 2 planned days, both written
-    assert len(writer.writes) == 2
+    assert summary["written"] == 2       # 2 planned days, both savedowned
+    assert len(writer.savedowns) == 2
 
 
 # --- current-day gap bridge ------------------------------------------------
@@ -190,7 +201,7 @@ def _fake_universe(monkeypatch, ids):
 def test_bridge_pages_from_floor_and_stops_before_target(monkeypatch, tmp_path):
     _fake_universe(monkeypatch, range(6, 13))       # ids 6..12 exist
     writer = FakeWriter(floor=5)
-    summary = backfill.bridge(_cfg(tmp_path), writer, target_id=9, page=2)
+    summary = backfill.bridge(_cfg(tmp_path), writer, "BTCUSDT", target_id=9, page=2)
     assert writer.inserted == [6, 7, 8]             # < target 9
     assert summary["inserted"] == 3
     assert summary["from_id"] == 6
@@ -199,14 +210,28 @@ def test_bridge_pages_from_floor_and_stops_before_target(monkeypatch, tmp_path):
 def test_bridge_fills_to_tip_when_no_target(monkeypatch, tmp_path):
     _fake_universe(monkeypatch, range(6, 10))       # ids 6..9 exist
     writer = FakeWriter(floor=5)
-    summary = backfill.bridge(_cfg(tmp_path), writer, target_id=None, page=2)
+    summary = backfill.bridge(_cfg(tmp_path), writer, "BTCUSDT", target_id=None, page=2)
     assert writer.inserted == [6, 7, 8, 9]
     assert summary["inserted"] == 4
 
 
+def test_bridge_uses_per_symbol_floor(monkeypatch, tmp_path):
+    # each symbol resumes from ITS own stored id, not a shared/global one
+    seen_symbols = []
+
+    def fetch(symbol, from_id, limit, api_key=None, pacer=None):
+        seen_symbols.append((symbol, from_id))
+        return []                                    # caught up immediately
+    monkeypatch.setattr(backfill.binance_client, "fetch_trades", fetch)
+    writer = FakeWriter(floors={"BTCUSDT": 100, "ETHUSDT": 7})
+    backfill.bridge(_cfg(tmp_path), writer, "BTCUSDT")
+    backfill.bridge(_cfg(tmp_path), writer, "ETHUSDT")
+    assert seen_symbols == [("BTCUSDT", 101), ("ETHUSDT", 8)]   # floor+1 per symbol
+
+
 def test_bridge_skips_when_no_stored_id(tmp_path):
     writer = FakeWriter(floor=None)
-    assert backfill.bridge(_cfg(tmp_path), writer)["inserted"] == 0
+    assert backfill.bridge(_cfg(tmp_path), writer, "BTCUSDT")["inserted"] == 0
 
 
 def test_bridge_paces_every_fetch(monkeypatch, tmp_path):
@@ -221,7 +246,7 @@ def test_bridge_paces_every_fetch(monkeypatch, tmp_path):
                 for i in avail]
 
     monkeypatch.setattr(backfill.binance_client, "fetch_trades", fetch)
-    backfill.bridge(_cfg(tmp_path), FakeWriter(floor=5), page=5)
+    backfill.bridge(_cfg(tmp_path), FakeWriter(floor=5), "BTCUSDT", page=5)
     assert len(seen) >= 2                       # multiple pages
     assert all(p is not None for p in seen)     # each paced
     assert len(set(map(id, seen))) == 1         # the SAME pacer instance across pages
